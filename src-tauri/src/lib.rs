@@ -7,6 +7,7 @@
 
 pub mod db;
 pub mod models;
+pub mod parsers;
 
 use models::Pricing;
 
