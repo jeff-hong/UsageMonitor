@@ -6,10 +6,13 @@
 //! - (later) `parsers`, `indexer`, `query`
 
 pub mod db;
+pub mod indexer;
 pub mod models;
 pub mod parsers;
+pub mod query;
 
 use models::Pricing;
+use tauri::Manager;
 
 /// Report DB readiness + path so the frontend can confirm the backend booted
 /// and the database was created. Used as a smoke check in phase 1.
@@ -69,8 +72,36 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(db)
-        .invoke_handler(tauri::generate_handler![db_status, list_pricing])
+        .manage(db.clone())
+        .setup(move |app| {
+            // Kick off the first-ever full index on a background thread. It emits
+            // `index-progress` events to the frontend; later phases add a timer
+            // for incremental today-scans.
+            let db = app.state::<db::Db>().inner().clone();
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                indexer::initial_full_index(db.clone(), handle.clone());
+                // After indexing, keep scanning "today" every 30s (default; the
+                // settings-driven interval lands in a later phase).
+                let interval = std::time::Duration::from_secs(30);
+                loop {
+                    std::thread::sleep(interval);
+                    let snapshot = db.clone();
+                    std::thread::spawn(move || indexer::incremental_scan(snapshot));
+                }
+            });
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            db_status,
+            list_pricing,
+            query::get_today_summary,
+            query::get_range_summary,
+            query::get_history,
+            query::get_daily_sessions,
+            query::get_projects,
+            query::recompute_cost,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
