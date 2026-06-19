@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import "./App.css";
 
 interface DbStatus {
   ok: boolean;
@@ -34,7 +35,7 @@ function App() {
   }, []);
 
   return (
-    <div className="glass-card">
+    <div className="glass-card" data-tauri-drag-region>
       <div className="label-tiny">PHASE 1 · BACKEND CHECK</div>
       <h1>UsageMonitor</h1>
 

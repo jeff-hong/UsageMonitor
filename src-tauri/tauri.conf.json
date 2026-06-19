@@ -5,20 +5,25 @@
   "identifier": "com.zcode.usagemonitor",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://127.0.0.1:1420",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "label": "widget",
         "title": "UsageMonitor",
-        "width": 220,
-        "height": 260,
+        "width": 240,
+        "height": 300,
         "resizable": false,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "shadow": true,
         "visible": true,
-        "center": true
+        "center": true,
+        "devtools": true
       }
     ],
     "security": {

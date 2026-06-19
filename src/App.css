@@ -9,23 +9,33 @@
 html,
 body,
 #root {
-  height: 100%;
   margin: 0;
+  height: 100%;
+  overflow: hidden;
 }
 
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  background: transparent;
+  /* Fallback gradient: even when the window is transparent over a dark
+     desktop, the app must never look pure-black. backdrop-filter inside
+     .glass-card then frosts whatever shows through. */
+  background: radial-gradient(circle at 30% 20%, #3a2f5e, #1a1a2e 70%);
   color: #fff;
   -webkit-font-smoothing: antialiased;
 }
 
 /* Frosted-glass surface, the visual signature of the whole app.
-   backdrop-filter saturate gives the iOS Control Center sheen. */
+   backdrop-filter saturate gives the iOS Control Center sheen. Size to the
+   viewport via flexbox so content never overflows the small widget window. */
+#root {
+  display: flex;
+}
+
 .glass-card {
-  min-height: 100%;
+  flex: 1;
   box-sizing: border-box;
   padding: 18px;
+  overflow-y: auto;
   background: rgba(255, 255, 255, 0.12);
   backdrop-filter: blur(28px) saturate(180%);
   -webkit-backdrop-filter: blur(28px) saturate(180%);
