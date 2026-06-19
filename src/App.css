@@ -16,33 +16,27 @@ body,
 
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  /* Fallback gradient: even when the window is transparent over a dark
-     desktop, the app must never look pure-black. backdrop-filter inside
-     .glass-card then frosts whatever shows through. */
+  /* Fallback gradient behind the glass so the window is never pure-black. */
   background: radial-gradient(circle at 30% 20%, #3a2f5e, #1a1a2e 70%);
   color: #fff;
   -webkit-font-smoothing: antialiased;
 }
 
-/* Frosted-glass surface, the visual signature of the whole app.
-   backdrop-filter saturate gives the iOS Control Center sheen. Size to the
-   viewport via flexbox so content never overflows the small widget window. */
 #root {
   display: flex;
 }
 
+/* ---- shared glass surface ---- */
 .glass-card {
   flex: 1;
   box-sizing: border-box;
-  padding: 18px;
-  overflow-y: auto;
   background: rgba(255, 255, 255, 0.12);
   backdrop-filter: blur(28px) saturate(180%);
   -webkit-backdrop-filter: blur(28px) saturate(180%);
   border: 1px solid rgba(255, 255, 255, 0.18);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35),
     inset 0 1px 0 rgba(255, 255, 255, 0.15);
-  border-radius: 20px;
+  color: #fff;
 }
 
 .label-tiny {
@@ -53,89 +47,383 @@ body {
   font-weight: 600;
 }
 
-.glass-card h1 {
-  font-size: 22px;
-  font-weight: 700;
-  margin: 4px 0 14px;
-  letter-spacing: -0.5px;
-}
-
-.status-block {
-  background: rgba(0, 0, 0, 0.12);
-  border-radius: 14px;
-  padding: 12px;
-  margin-bottom: 14px;
-}
-
-.status-row {
+/* ===================== Card widget ===================== */
+.widget-root {
+  flex: 1;
   display: flex;
-  justify-content: space-between;
-  align-items: center;
+  position: relative;
+}
+
+.widget-card {
+  border-radius: 22px;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  cursor: grab;
+}
+.widget-card .big-num {
+  font-size: 32px;
+  font-weight: 700;
+  letter-spacing: -1px;
+  line-height: 1;
+  margin-top: 6px;
+}
+.widget-card .token-total {
   font-size: 12px;
-  padding: 6px 0;
+  opacity: 0.6;
+  margin-top: 4px;
 }
-
-.status-row + .status-row {
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+.widget-card .tool-rows {
+  margin-top: 14px;
 }
-
-.status-row .ok {
-  color: #34c759;
-  font-weight: 700;
+.widget-card .tool-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  padding: 5px 0;
+  align-items: center;
 }
-
-.status-row .pending {
-  opacity: 0.5;
+.widget-card .tool-row + .tool-row {
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
 }
-
-.mono {
-  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+.widget-card .tool-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.widget-card .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.widget-card .tool-tok {
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+}
+.widget-card .hint {
+  margin-top: auto;
   font-size: 10px;
-  opacity: 0.8;
-  max-width: 60%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  opacity: 0.35;
+  text-align: center;
+  padding-top: 10px;
 }
 
-.error {
-  color: #ff6b6b;
+/* ===================== Pill widget ===================== */
+.widget-pill {
+  border-radius: 30px;
+  padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  cursor: grab;
+}
+.widget-pill .pill-seg {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.widget-pill .divider {
+  width: 1px;
+  height: 22px;
+  background: rgba(255, 255, 255, 0.2);
+  margin-right: 8px;
+}
+.widget-pill .pill-val {
+  font-size: 15px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ===================== Gauge widget ===================== */
+.widget-gauge {
+  border-radius: 50%;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+}
+.widget-gauge .gauge-ring {
+  width: 100px;
+  height: 100px;
+  border-radius: 50%;
+  background: conic-gradient(#5ac8fa 0% 68%, rgba(255, 255, 255, 0.1) 68% 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  -webkit-mask: radial-gradient(circle, transparent 40px, #000 41px);
+  mask: radial-gradient(circle, transparent 40px, #000 41px);
+}
+.widget-gauge .gauge-inner {
+  text-align: center;
+}
+.widget-gauge .gauge-num {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+}
+.widget-gauge .gauge-label {
+  font-size: 9px;
+  opacity: 0.6;
+  margin-top: 2px;
+}
+.widget-gauge .gauge-tokens {
+  font-size: 10px;
+  opacity: 0.6;
+  margin-top: 6px;
+}
+.widget-gauge .gauge-unpriced {
+  font-size: 8px;
+  opacity: 0.5;
+  margin-top: 2px;
+}
+
+/* shape cycle button (bottom corner of any widget) */
+.shape-cycle {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
   font-size: 11px;
-  background: rgba(255, 107, 107, 0.12);
-  border-radius: 10px;
-  padding: 8px 10px;
-  margin-bottom: 12px;
+  opacity: 0.5;
+  cursor: pointer;
+  z-index: 10;
+}
+.shape-cycle:hover {
+  opacity: 1;
 }
 
-.pricing-block {
-  background: rgba(0, 0, 0, 0.08);
-  border-radius: 14px;
-  padding: 12px;
+/* ===================== Detail panel ===================== */
+.detail-panel {
+  border-radius: 20px;
+  padding: 16px;
+  flex-direction: column;
+  display: flex;
+  overflow-y: auto;
 }
-
-.pricing-list {
-  list-style: none;
-  margin: 8px 0 0;
-  padding: 0;
-}
-
-.pricing-list li {
+.detail-panel .panel-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  cursor: grab;
+}
+.detail-panel .date-label {
+  font-size: 12px;
+  opacity: 0.7;
+}
+.detail-panel .close-btn {
+  background: rgba(255, 255, 255, 0.12);
+  border: none;
+  color: #fff;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+.detail-panel .total-block {
+  margin-top: 10px;
+}
+.detail-panel .total-num {
+  font-size: 36px;
+  font-weight: 700;
+  letter-spacing: -1.5px;
+  line-height: 1;
+}
+.detail-panel .total-sub {
+  font-size: 12px;
+  opacity: 0.65;
+  margin-top: 4px;
+}
+
+.detail-panel .chip-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+.detail-panel .chip {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  padding: 10px 11px;
+}
+.detail-panel .chip-k {
+  font-size: 9px;
+  opacity: 0.6;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.detail-panel .chip-v {
+  font-size: 15px;
+  font-weight: 700;
+  margin-top: 3px;
+}
+.detail-panel .chip-v small {
+  font-size: 10px;
+  opacity: 0.6;
+  font-weight: 500;
+}
+
+.detail-panel .seg-tabs {
+  display: flex;
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 11px;
+  padding: 3px;
+  margin-top: 14px;
+}
+.detail-panel .tab {
+  flex: 1;
+  text-align: center;
+  padding: 7px;
   font-size: 11px;
-  padding: 6px 0;
+  color: rgba(255, 255, 255, 0.55);
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 500;
+}
+.detail-panel .tab.active {
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
 }
 
-.pricing-list li + li {
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+.detail-panel .tool-section {
+  margin-top: 6px;
 }
-
-.pricing-list .model {
+.detail-panel .tool-detail {
+  padding: 12px 0;
+}
+.detail-panel .tool-detail + .tool-detail {
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+.detail-panel .tool-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.detail-panel .tool-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+}
+.detail-panel .tool-meta {
+  flex: 1;
+}
+.detail-panel .tool-title {
+  font-size: 13px;
   font-weight: 600;
 }
-
-.pricing-list .prices {
-  opacity: 0.6;
+.detail-panel .tool-stats {
   font-size: 10px;
+  opacity: 0.55;
+  margin-top: 1px;
+}
+.detail-panel .unpriced-tag {
+  margin-left: 6px;
+  color: #ffb84d;
+}
+.detail-panel .tool-amt {
+  text-align: right;
+}
+.detail-panel .amt-cost {
+  font-size: 14px;
+  font-weight: 700;
+}
+.detail-panel .amt-pct {
+  font-size: 10px;
+  opacity: 0.55;
+}
+.detail-panel .tool-bar {
+  height: 3px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 2px;
+  margin-top: 8px;
+  overflow: hidden;
+}
+.detail-panel .tool-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+.detail-panel .empty-state {
+  text-align: center;
+  font-size: 12px;
+  opacity: 0.5;
+  padding: 24px 0;
+}
+
+.detail-panel .spark-section {
+  margin-top: 10px;
+  padding-bottom: 6px;
+}
+.detail-panel .section-title {
+  font-size: 10px;
+  opacity: 0.6;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin-bottom: 8px;
+}
+.detail-panel .spark {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 50px;
+}
+.detail-panel .spark-bar {
+  flex: 1;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0.15));
+  border-radius: 3px 3px 0 0;
+  min-height: 4px;
+}
+.detail-panel .spark-bar.today {
+  background: linear-gradient(180deg, #34c759, rgba(52, 199, 89, 0.3));
+}
+.detail-panel .spark-empty {
+  font-size: 11px;
+  opacity: 0.4;
+  width: 100%;
+  text-align: center;
+}
+.detail-panel .spark-axis {
+  display: flex;
+  justify-content: space-between;
+  font-size: 9px;
+  opacity: 0.4;
+  margin-top: 4px;
+}
+
+.detail-panel .panel-footer {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.detail-panel .footer-btn {
+  flex: 1;
+  text-align: center;
+  font-size: 11px;
+  padding: 9px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  color: #fff;
+  cursor: pointer;
+}
+.detail-panel .footer-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
 }
