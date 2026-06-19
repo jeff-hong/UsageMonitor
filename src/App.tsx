@@ -1,6 +1,6 @@
 // App: the widget window root. Holds the current widget shape and whether the
-// detail panel is open. Widget shape switching persists to localStorage so the
-// user's choice survives restarts (a settings page hook replaces this in p5).
+// detail panel is open. Window is user-resizable: decorations are off so we
+// render our own thin resize edges that call startResize(direction).
 
 import { useState } from "react";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
@@ -18,24 +18,46 @@ function loadShape(): WidgetShape {
   return s === "pill" || s === "gauge" || s === "card" ? s : "card";
 }
 
+// Thin edges + corners that drive native window resizing on a frameless
+// window. Each calls startResizeDragging with the directions it represents.
+function startResize(dir: "East" | "North" | "NorthEast" | "NorthWest" | "South" | "SouthEast" | "SouthWest" | "West") {
+  getCurrentWindow().startResizeDragging(dir).catch(() => {});
+}
+
+function ResizeHandles() {
+  return (
+    <>
+      <div className="rz rz-top" onMouseDown={() => startResize("North")} />
+      <div className="rz rz-bottom" onMouseDown={() => startResize("South")} />
+      <div className="rz rz-left" onMouseDown={() => startResize("West")} />
+      <div className="rz rz-right" onMouseDown={() => startResize("East")} />
+      <div className="rz rz-tl" onMouseDown={() => startResize("NorthWest")} />
+      <div className="rz rz-tr" onMouseDown={() => startResize("NorthEast")} />
+      <div className="rz rz-bl" onMouseDown={() => startResize("SouthWest")} />
+      <div className="rz rz-br" onMouseDown={() => startResize("SouthEast")} />
+    </>
+  );
+}
+
 function App() {
   const [shape, setShape] = useState<WidgetShape>(loadShape);
   const [detailOpen, setDetailOpen] = useState(false);
   const { summary, loading } = useTodaySummary();
 
-  // When the detail panel is open, the window grows; Tauri resizes it for us
-  // in a later phase. For now both views render in the same window.
   if (detailOpen) {
     return (
-      <DetailPanel
-        onClose={() => {
-          setDetailOpen(false);
-          // Shrink back to widget size.
-          getCurrentWindow()
-            .setSize(new LogicalSize(240, 300))
-            .catch(() => {});
-        }}
-      />
+      <>
+        <DetailPanel
+          onClose={() => {
+            setDetailOpen(false);
+            // Shrink back toward a widget size; user can still drag freely.
+            getCurrentWindow()
+              .setSize(new LogicalSize(240, 300))
+              .catch(() => {});
+          }}
+        />
+        <ResizeHandles />
+      </>
     );
   }
 
@@ -47,16 +69,20 @@ function App() {
   };
 
   const cycleShape = () => {
-    const next: WidgetShape = shape === "card" ? "pill" : shape === "pill" ? "gauge" : "card";
+    const next: WidgetShape =
+      shape === "card" ? "pill" : shape === "pill" ? "gauge" : "card";
     setShape(next);
     localStorage.setItem("widget_shape", next);
-    // Resize to fit the new shape.
+    // Nudge to a sensible default size for the new shape, but the user can
+    // then drag it to anything they like.
     const sizes = {
       card: { width: 240, height: 300 },
-      pill: { width: 320, height: 80 },
-      gauge: { width: 180, height: 220 },
+      pill: { width: 340, height: 90 },
+      gauge: { width: 200, height: 240 },
     };
-    getCurrentWindow().setSize(new LogicalSize(sizes[next].width, sizes[next].height)).catch(() => {});
+    getCurrentWindow()
+      .setSize(new LogicalSize(sizes[next].width, sizes[next].height))
+      .catch(() => {});
   };
 
   return (
@@ -73,6 +99,7 @@ function App() {
       <div className="shape-cycle" onClick={cycleShape} title="切换悬浮窗样式">
         ⇄
       </div>
+      <ResizeHandles />
     </div>
   );
 }

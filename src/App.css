@@ -201,6 +201,22 @@ body {
   opacity: 1;
 }
 
+/* ---- resize edges/corners for the frameless window ----
+   Invisible 6px hit areas on each side + 12px corners. They sit above the
+   glass so dragging them triggers native startResize. */
+.rz {
+  position: absolute;
+  z-index: 20;
+}
+.rz-top { top: 0; left: 6px; right: 6px; height: 6px; cursor: ns-resize; }
+.rz-bottom { bottom: 0; left: 6px; right: 6px; height: 6px; cursor: ns-resize; }
+.rz-left { left: 0; top: 6px; bottom: 6px; width: 6px; cursor: ew-resize; }
+.rz-right { right: 0; top: 6px; bottom: 6px; width: 6px; cursor: ew-resize; }
+.rz-tl { top: 0; left: 0; width: 12px; height: 12px; cursor: nwse-resize; }
+.rz-tr { top: 0; right: 0; width: 12px; height: 12px; cursor: nesw-resize; }
+.rz-bl { bottom: 0; left: 0; width: 12px; height: 12px; cursor: nesw-resize; }
+.rz-br { bottom: 0; right: 0; width: 12px; height: 12px; cursor: nwse-resize; }
+
 /* ===================== Detail panel ===================== */
 .detail-panel {
   border-radius: 20px;
