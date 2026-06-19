@@ -1,0 +1,311 @@
+//! SQLite connection management, schema, and migrations.
+//!
+//! See design doc §4. The DB lives under the app data dir. We use WAL mode so
+//! background indexer writes don't block UI reads. All writes go through the
+//! single connection guarded by `Db` (the Mutex); reads may share it.
+
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use rusqlite::Connection;
+
+use crate::models::{Pricing, Tool};
+
+/// The current schema version, used for future migrations.
+pub const DB_VERSION: i64 = 1;
+
+/// A thread-safe handle to the database. Cloning shares the single connection.
+#[derive(Clone)]
+pub struct Db {
+    conn: Arc<Mutex<Connection>>,
+    path: Arc<PathBuf>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DbError {
+    #[error("sqlite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+    #[error("cannot locate app data directory")]
+    NoAppDir,
+}
+
+impl Db {
+    /// Open (or create) the database under the app data dir, run migrations, and
+    /// seed built-in pricing on first run.
+    pub fn open() -> Result<Self, DbError> {
+        let path = db_path()?;
+        Self::open_at(&path)
+    }
+
+    /// Open (or create) the database at an explicit path. Used by `open()` for
+    /// the real app dir and by tests for a temp-file database.
+    pub fn open_at(path: &std::path::Path) -> Result<Self, DbError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let conn = Connection::open(path)?;
+        apply_pragmas(&conn)?;
+        migrate(&conn)?;
+        seed_builtin_pricing(&conn)?;
+        Ok(Db {
+            conn: Arc::new(Mutex::new(conn)),
+            path: Arc::new(path.to_path_buf()),
+        })
+    }
+
+    /// Acquire the connection lock. Callers must hold the guard only briefly.
+    pub fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().expect("db mutex poisoned")
+    }
+
+    /// The actual on-disk path this handle was opened against.
+    pub fn path(&self) -> PathBuf {
+        (*self.path).clone()
+    }
+}
+
+fn db_path() -> Result<PathBuf, DbError> {
+    let base = dirs::data_dir().ok_or(DbError::NoAppDir)?;
+    Ok(base.join("UsageMonitor").join("usage.db"))
+}
+
+fn apply_pragmas(conn: &Connection) -> Result<(), DbError> {
+    // WAL: concurrent readers + single writer, exactly the access pattern the
+    // indexer (writer) and query layer (reader) need.
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    Ok(())
+}
+
+/// Run idempotent schema creation + version migration.
+///
+/// First version: create all tables. Future versions add ALTER steps guarded
+/// by the stored version.
+fn migrate(conn: &Connection) -> Result<(), DbError> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS usage_records (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            date         TEXT    NOT NULL,
+            tool         TEXT    NOT NULL,
+            project      TEXT,
+            model        TEXT    NOT NULL,
+            session_id   TEXT    NOT NULL,
+            input_tok    INTEGER NOT NULL DEFAULT 0,
+            output_tok   INTEGER NOT NULL DEFAULT 0,
+            cache_tok    INTEGER NOT NULL DEFAULT 0,
+            cost_usd     REAL    NOT NULL DEFAULT 0,
+            priced       INTEGER NOT NULL DEFAULT 0,
+            timestamp    INTEGER NOT NULL,
+            source_file  TEXT    NOT NULL,
+            UNIQUE(source_file, session_id, timestamp)
+        );
+        CREATE INDEX IF NOT EXISTS idx_usage_date    ON usage_records(date);
+        CREATE INDEX IF NOT EXISTS idx_usage_tool    ON usage_records(tool);
+        CREATE INDEX IF NOT EXISTS idx_usage_project ON usage_records(project);
+
+        CREATE TABLE IF NOT EXISTS pricing (
+            model          TEXT PRIMARY KEY,
+            in_per_mtok    REAL NOT NULL,
+            out_per_mtok   REAL NOT NULL,
+            cache_per_mtok REAL NOT NULL,
+            builtin        INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS file_state (
+            source_file TEXT PRIMARY KEY,
+            tool        TEXT NOT NULL,
+            file_offset INTEGER NOT NULL DEFAULT 0,
+            last_seen   INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        ",
+    )?;
+    set_setting_raw(conn, "db_version", &DB_VERSION.to_string())?;
+    Ok(())
+}
+
+/// Seed the official default prices on an empty pricing table. User edits or
+/// custom models override these. See design doc §4.2 (values to be verified
+/// against current public pricing during implementation).
+fn seed_builtin_pricing(conn: &Connection) -> Result<(), DbError> {
+    let defaults = builtin_pricing();
+    let mut existing = conn.prepare("SELECT COUNT(*) FROM pricing")?;
+    let count: i64 = existing.query_row([], |r| r.get(0))?;
+    if count > 0 {
+        return Ok(());
+    }
+    for p in defaults {
+        conn.execute(
+            "INSERT OR IGNORE INTO pricing (model, in_per_mtok, out_per_mtok, cache_per_mtok, builtin)
+             VALUES (?1, ?2, ?3, ?4, 1)",
+            rusqlite::params![p.model, p.in_per_mtok, p.out_per_mtok, p.cache_per_mtok],
+        )?;
+    }
+    Ok(())
+}
+
+/// Built-in reference pricing. These are defaults the user can override; unknown
+/// models (e.g. glm-5.1) are intentionally absent and shown as `—` until filled.
+///
+/// Prices are USD per million tokens, from official public sources at time of
+/// writing. TODO: verify against current published rates before release.
+pub fn builtin_pricing() -> Vec<Pricing> {
+    vec![
+        Pricing {
+            model: "claude-sonnet-4".into(),
+            in_per_mtok: 3.0,
+            out_per_mtok: 15.0,
+            cache_per_mtok: 0.30,
+            builtin: true,
+        },
+        Pricing {
+            model: "claude-opus-4".into(),
+            in_per_mtok: 15.0,
+            out_per_mtok: 75.0,
+            cache_per_mtok: 1.50,
+            builtin: true,
+        },
+        Pricing {
+            model: "claude-haiku-3.5".into(),
+            in_per_mtok: 0.80,
+            out_per_mtok: 4.0,
+            cache_per_mtok: 0.08,
+            builtin: true,
+        },
+        Pricing {
+            model: "gpt-5".into(),
+            in_per_mtok: 1.25,
+            out_per_mtok: 10.0,
+            cache_per_mtok: 0.125,
+            builtin: true,
+        },
+        Pricing {
+            model: "gpt-5-mini".into(),
+            in_per_mtok: 0.25,
+            out_per_mtok: 2.0,
+            cache_per_mtok: 0.025,
+            builtin: true,
+        },
+    ]
+}
+
+/// Raw setting write, used internally during migration.
+pub(crate) fn set_setting_raw(conn: &Connection, key: &str, value: &str) -> Result<(), DbError> {
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![key, value],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_db() -> Db {
+        let dir = std::env::temp_dir().join(format!(
+            "um-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        Db::open_at(&dir.join("test.db")).expect("open temp db")
+    }
+
+    #[test]
+    fn schema_creates_all_tables() {
+        let db = temp_db();
+        let conn = db.lock();
+        for table in ["usage_records", "pricing", "file_state", "settings"] {
+            let n: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}'"),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "table {table} should exist");
+        }
+    }
+
+    #[test]
+    fn builtin_pricing_seeded_once() {
+        let db = temp_db();
+        let conn = db.lock();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pricing", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, builtin_pricing().len() as i64);
+
+        // Re-opening must NOT duplicate or wipe user rows. Add a custom model,
+        // reopen at the same path, confirm both the custom row and seed survive.
+        conn.execute(
+            "INSERT INTO pricing (model, in_per_mtok, out_per_mtok, cache_per_mtok, builtin)
+             VALUES ('glm-5.1', 0.5, 1.5, 0.05, 0)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let path = db.path();
+        let db2 = Db::open_at(&path).unwrap();
+        let conn2 = db2.lock();
+        let has_custom: i64 = conn2
+            .query_row("SELECT COUNT(*) FROM pricing WHERE model='glm-5.1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(has_custom, 1, "custom pricing must survive reopen");
+    }
+
+    #[test]
+    fn usage_record_upsert_dedups() {
+        let db = temp_db();
+        let conn = db.lock();
+        // Insert the same (source_file, session_id, timestamp) twice; the UNIQUE
+        // constraint should keep exactly one row.
+        for _ in 0..2 {
+            conn.execute(
+                "INSERT INTO usage_records
+                   (date, tool, project, model, session_id, input_tok, output_tok,
+                    cache_tok, cost_usd, priced, timestamp, source_file)
+                 VALUES ('2026-06-19','claude','p','glm-5.1',100,200,300,400,0.01,0,999,'f.jsonl')
+                 ON CONFLICT(source_file, session_id, timestamp) DO UPDATE SET input_tok=excluded.input_tok",
+                [],
+            )
+            .unwrap();
+        }
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM usage_records", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "duplicate usage records must dedup to one row");
+    }
+
+    #[test]
+    fn db_version_stored() {
+        let db = temp_db();
+        let conn = db.lock();
+        let v: String = conn
+            .query_row("SELECT value FROM settings WHERE key='db_version'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, DB_VERSION.to_string());
+    }
+}
+
+/// Tool <-> DB string conversion, reused by indexer and query.
+pub fn tool_to_str(t: Tool) -> &'static str {
+    match t {
+        Tool::Claude => "claude",
+        Tool::Codex => "codex",
+    }
+}
+
+pub fn tool_from_str(s: &str) -> Option<Tool> {
+    Tool::from_str(s)
+}
