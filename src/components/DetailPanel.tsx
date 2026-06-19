@@ -11,6 +11,8 @@ import {
   type Range,
   type Summary,
 } from "../lib/api";
+import { HistoryPage } from "./HistoryPage";
+import { ProjectsPage } from "./ProjectsPage";
 
 const TOOL_COLOR: Record<string, string> = {
   claude: "#ff8c42",
@@ -22,7 +24,10 @@ const TOOL_LABEL: Record<string, string> = {
 };
 const TOOL_ICON: Record<string, string> = { claude: "✦", codex: "◈" };
 
+type View = "overview" | "history" | "projects";
+
 export function DetailPanel({ onClose }: { onClose: () => void }) {
+  const [view, setView] = useState<View>("overview");
   const [range, setRange] = useState<Range>("today");
   const [summary, setSummary] = useState<Summary | null>(null);
   const [history, setHistory] = useState<DayPoint[]>([]);
@@ -48,13 +53,26 @@ export function DetailPanel({ onClose }: { onClose: () => void }) {
     day: "numeric",
   });
 
+  if (view === "history") {
+    return <HistoryPage onBack={() => setView("overview")} />;
+  }
+  if (view === "projects") {
+    return <ProjectsPage onBack={() => setView("overview")} />;
+  }
+
   return (
     <div className="glass-card detail-panel">
       <div className="panel-header" data-tauri-drag-region>
         <span className="date-label">{todayLabel}</span>
-        <button className="close-btn" onClick={onClose}>
-          ✕
-        </button>
+        <div className="header-actions">
+          <button className="icon-btn" onClick={() => setView("history")} title="历史记录">📊</button>
+          <button className="icon-btn" onClick={() => setView("projects")} title="按项目">📁</button>
+          <button className="icon-btn" onClick={() => {
+            // open settings via a custom event the App root listens for
+            window.dispatchEvent(new CustomEvent("open-settings"));
+          }} title="设置">⚙</button>
+          <button className="close-btn" onClick={onClose}>✕</button>
+        </div>
       </div>
 
       <div className="total-block">
@@ -165,10 +183,10 @@ export function DetailPanel({ onClose }: { onClose: () => void }) {
       </div>
 
       <div className="panel-footer">
-        <button className="footer-btn" onClick={() => alert("历史记录页将在第五阶段实现")}>
+        <button className="footer-btn" onClick={() => setView("history")}>
           📊 历史记录
         </button>
-        <button className="footer-btn" onClick={() => alert("按项目页将在第五阶段实现")}>
+        <button className="footer-btn" onClick={() => setView("projects")}>
           📁 按项目
         </button>
       </div>

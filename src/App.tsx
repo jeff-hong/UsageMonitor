@@ -2,13 +2,14 @@
 // detail panel is open. Window is user-resizable: decorations are off so we
 // render our own thin resize edges that call startResize(direction).
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import "./App.css";
 import { CardWidget } from "./components/widgets/CardWidget";
 import { PillWidget } from "./components/widgets/PillWidget";
 import { GaugeWidget } from "./components/widgets/GaugeWidget";
 import { DetailPanel } from "./components/DetailPanel";
+import { SettingsPage } from "./components/SettingsPage";
 import { useTodaySummary } from "./hooks/useTodaySummary";
 
 type WidgetShape = "card" | "pill" | "gauge";
@@ -42,7 +43,32 @@ function ResizeHandles() {
 function App() {
   const [shape, setShape] = useState<WidgetShape>(loadShape);
   const [detailOpen, setDetailOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const { summary, loading } = useTodaySummary();
+
+  // Detail panel dispatches this custom event to open settings.
+  useEffect(() => {
+    const h = () => setSettingsOpen(true);
+    window.addEventListener("open-settings", h);
+    return () => window.removeEventListener("open-settings", h);
+  }, []);
+
+  if (settingsOpen) {
+    return (
+      <>
+        <SettingsPage
+          onBack={() => {
+            setSettingsOpen(false);
+            if (!detailOpen) {
+              getCurrentWindow().setSize(new LogicalSize(240, 300)).catch(() => {});
+            }
+          }}
+          onShapeChange={(s) => setShape(s)}
+        />
+        <ResizeHandles />
+      </>
+    );
+  }
 
   if (detailOpen) {
     return (
@@ -50,10 +76,7 @@ function App() {
         <DetailPanel
           onClose={() => {
             setDetailOpen(false);
-            // Shrink back toward a widget size; user can still drag freely.
-            getCurrentWindow()
-              .setSize(new LogicalSize(240, 300))
-              .catch(() => {});
+            getCurrentWindow().setSize(new LogicalSize(240, 300)).catch(() => {});
           }}
         />
         <ResizeHandles />

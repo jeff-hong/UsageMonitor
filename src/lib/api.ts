@@ -71,6 +71,11 @@ export interface IndexProgress {
   done: boolean;
 }
 
+export interface UnpricedModel {
+  model: string;
+  tokens: number;
+}
+
 // --- commands ---
 
 export const api = {
@@ -79,8 +84,21 @@ export const api = {
   getHistory: (range: Range) => invoke<DayPoint[]>("get_history", { range }),
   getDailySessions: (date: string) => invoke<SessionRow[]>("get_daily_sessions", { date }),
   getProjects: () => invoke<ProjectRow[]>("get_projects"),
+  getProjectSessions: (project: string) =>
+    invoke<SessionRow[]>("get_project_sessions", { project }),
   recomputeCost: () => invoke<void>("recompute_cost"),
   listPricing: () => invoke<Pricing[]>("list_pricing"),
+  setPricing: (
+    model: string,
+    in_per_mtok: number,
+    out_per_mtok: number,
+    cache_per_mtok: number
+  ) => invoke<void>("set_pricing", { model, in_per_mtok, out_per_mtok, cache_per_mtok }),
+  deletePricing: (model: string) => invoke<boolean>("delete_pricing", { model }),
+  getUnpricedModels: () => invoke<UnpricedModel[]>("get_unpriced_models"),
+  getSetting: (key: string) => invoke<string | null>("get_setting", { key }),
+  setSetting: (key: string, value: string) =>
+    invoke<void>("set_setting", { key, value }),
 };
 
 // Subscribe to the backend's indexing progress events.

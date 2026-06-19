@@ -75,17 +75,27 @@ pub fn run() {
         .manage(db.clone())
         .setup(move |app| {
             // Kick off the first-ever full index on a background thread. It emits
-            // `index-progress` events to the frontend; later phases add a timer
-            // for incremental today-scans.
+            // `index-progress` events to the frontend; after it finishes, a loop
+            // re-scans "today" on the user-configured interval (default 30s).
             let db = app.state::<db::Db>().inner().clone();
             let handle = app.handle().clone();
             std::thread::spawn(move || {
                 indexer::initial_full_index(db.clone(), handle.clone());
-                // After indexing, keep scanning "today" every 30s (default; the
-                // settings-driven interval lands in a later phase).
-                let interval = std::time::Duration::from_secs(30);
                 loop {
-                    std::thread::sleep(interval);
+                    // Read the interval fresh each tick so settings changes apply.
+                    let secs = {
+                        let conn = db.lock();
+                        conn.query_row(
+                            "SELECT value FROM settings WHERE key='scan_interval_sec'",
+                            [],
+                            |r| r.get::<_, String>(0),
+                        )
+                        .ok()
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .filter(|&n| n > 0)
+                        .unwrap_or(30)
+                    };
+                    std::thread::sleep(std::time::Duration::from_secs(secs));
                     let snapshot = db.clone();
                     std::thread::spawn(move || indexer::incremental_scan(snapshot));
                 }
@@ -100,7 +110,13 @@ pub fn run() {
             query::get_history,
             query::get_daily_sessions,
             query::get_projects,
+            query::get_project_sessions,
             query::recompute_cost,
+            query::set_pricing,
+            query::delete_pricing,
+            query::get_unpriced_models,
+            query::get_setting,
+            query::set_setting,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

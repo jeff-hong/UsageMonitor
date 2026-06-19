@@ -6,7 +6,7 @@
 //! pre-computed `cost_usd` column (written by the indexer), so queries stay
 //! cheap — no per-row pricing lookup.
 
-use crate::db::Db;
+use crate::db::{self, Db};
 use crate::models::Range;
 
 /// One tool's contribution within a summary.
@@ -277,6 +277,119 @@ pub fn recompute_cost(state: tauri::State<'_, Db>) {
             priced = CASE WHEN EXISTS(SELECT 1 FROM pricing p WHERE p.model = usage_records.model) THEN 1 ELSE 0 END",
         [],
     );
+}
+
+/// Insert or update one model's price. Used by the settings page to add custom
+/// models (e.g. glm-5.1) or override a builtin.
+#[tauri::command]
+pub fn set_pricing(
+    state: tauri::State<'_, Db>,
+    model: String,
+    in_per_mtok: f64,
+    out_per_mtok: f64,
+    cache_per_mtok: f64,
+) {
+    let conn = state.lock();
+    let _ = conn.execute(
+        "INSERT INTO pricing (model, in_per_mtok, out_per_mtok, cache_per_mtok, builtin)
+         VALUES (?1,?2,?3,?4,0)
+         ON CONFLICT(model) DO UPDATE SET
+            in_per_mtok=excluded.in_per_mtok,
+            out_per_mtok=excluded.out_per_mtok,
+            cache_per_mtok=excluded.cache_per_mtok",
+        rusqlite::params![model, in_per_mtok, out_per_mtok, cache_per_mtok],
+    );
+}
+
+/// Delete a custom (non-builtin) pricing row. Builtins can't be removed.
+#[tauri::command]
+pub fn delete_pricing(state: tauri::State<'_, Db>, model: String) -> bool {
+    let conn = state.lock();
+    conn.execute(
+        "DELETE FROM pricing WHERE model = ?1 AND builtin = 0",
+        rusqlite::params![model],
+    )
+    .map(|n| n > 0)
+    .unwrap_or(false)
+}
+
+/// Models seen in usage data but missing a price row — the settings page lists
+/// these so the user knows what to fill in (e.g. their glm-5.1).
+#[derive(serde::Serialize)]
+pub struct UnpricedModel {
+    pub model: String,
+    pub tokens: u64,
+}
+
+#[tauri::command]
+pub fn get_unpriced_models(state: tauri::State<'_, Db>) -> Vec<UnpricedModel> {
+    let conn = state.lock();
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT model, COALESCE(SUM(input_tok)+SUM(output_tok)+SUM(cache_tok),0)
+         FROM usage_records
+         WHERE model NOT IN (SELECT model FROM pricing)
+         GROUP BY model ORDER BY 2 DESC",
+    ) else {
+        return vec![];
+    };
+    stmt.query_map([], |r| {
+        Ok(UnpricedModel {
+            model: r.get(0)?,
+            tokens: r.get::<_, i64>(1)? as u64,
+        })
+    })
+    .map(|rows| rows.filter_map(Result::ok).collect())
+    .unwrap_or_default()
+}
+
+/// All sessions belonging to one project — for the projects-page drill-down.
+#[tauri::command]
+pub fn get_project_sessions(state: tauri::State<'_, Db>, project: String) -> Vec<SessionRow> {
+    let conn = state.lock();
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT tool, project, model, COALESCE(SUM(cost_usd),0),
+                COALESCE(SUM(input_tok),0), COALESCE(SUM(output_tok),0),
+                COALESCE(SUM(cache_tok),0), MAX(timestamp), MIN(priced)
+         FROM usage_records
+         WHERE COALESCE(project,'(unknown)') = ?1
+         GROUP BY session_id ORDER BY MAX(timestamp) DESC",
+    ) else {
+        return vec![];
+    };
+    stmt.query_map(rusqlite::params![project], |r| {
+        Ok(SessionRow {
+            tool: r.get(0)?,
+            project: r.get(1)?,
+            model: r.get(2)?,
+            cost_usd: r.get(3)?,
+            input_tok: r.get::<_, i64>(4)? as u64,
+            output_tok: r.get::<_, i64>(5)? as u64,
+            cache_tok: r.get::<_, i64>(6)? as u64,
+            timestamp: r.get(7)?,
+            priced: r.get::<_, i64>(8)? == 1,
+        })
+    })
+    .map(|rows| rows.filter_map(Result::ok).collect())
+    .unwrap_or_default()
+}
+
+/// Read a settings value (scan interval, widget/taskbar mode). Empty if unset.
+#[tauri::command]
+pub fn get_setting(state: tauri::State<'_, Db>, key: String) -> Option<String> {
+    let conn = state.lock();
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        rusqlite::params![key],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+}
+
+/// Write a settings value.
+#[tauri::command]
+pub fn set_setting(state: tauri::State<'_, Db>, key: String, value: String) {
+    let conn = state.lock();
+    let _ = db::set_setting_raw(&conn, &key, &value);
 }
 
 #[cfg(test)]
