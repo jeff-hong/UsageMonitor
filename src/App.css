@@ -54,6 +54,16 @@ body {
   position: relative;
 }
 
+/* Inner click layer: fills the widget so taps anywhere open detail, without
+   carrying data-tauri-drag-region (which would let the drag gesture swallow
+   the click). The outer card keeps drag-region for window dragging. */
+.widget-clickable {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  cursor: pointer;
+}
+
 .widget-card {
   border-radius: 22px;
   padding: 18px;
@@ -130,6 +140,11 @@ body {
   align-items: center;
   gap: 16px;
   cursor: grab;
+}
+.widget-pill .widget-clickable {
+  flex-direction: row;
+  align-items: center;
+  gap: 16px;
 }
 .widget-pill .pill-seg {
   display: flex;

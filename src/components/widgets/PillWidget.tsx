@@ -23,28 +23,26 @@ export function PillWidget({
 }) {
   const cost = summary?.cost_usd ?? 0;
   return (
-    <div
-      className="glass-card widget-pill"
-      data-tauri-drag-region
-      onClick={onOpenDetail}
-    >
-      <div className="pill-seg" data-tauri-drag-region>
-        <span className="label-tiny">花费</span>
-        <span className="pill-val">{loading ? "…" : fmtUsd(cost)}</span>
+    <div className="glass-card widget-pill" data-tauri-drag-region>
+      <div className="widget-clickable" onClick={onOpenDetail}>
+        <div className="pill-seg">
+          <span className="label-tiny">花费</span>
+          <span className="pill-val">{loading ? "…" : fmtUsd(cost)}</span>
+        </div>
+        {(summary?.tools ?? []).map((t) => {
+          const tt = t.input_tok + t.output_tok + t.cache_tok;
+          if (tt === 0) return null;
+          return (
+            <div className="pill-seg" key={t.tool}>
+              <span className="divider" />
+              <span className="label-tiny" style={{ color: TOOL_COLOR[t.tool] }}>
+                {TOOL_LABEL[t.tool] ?? t.tool}
+              </span>
+              <span className="pill-val">{fmtTokens(tt)}</span>
+            </div>
+          );
+        })}
       </div>
-      {(summary?.tools ?? []).map((t) => {
-        const tt = t.input_tok + t.output_tok + t.cache_tok;
-        if (tt === 0) return null;
-        return (
-          <div className="pill-seg" key={t.tool} data-tauri-drag-region>
-            <span className="divider" />
-            <span className="label-tiny" style={{ color: TOOL_COLOR[t.tool] }}>
-              {TOOL_LABEL[t.tool] ?? t.tool}
-            </span>
-            <span className="pill-val">{fmtTokens(tt)}</span>
-          </div>
-        );
-      })}
     </div>
   );
 }
