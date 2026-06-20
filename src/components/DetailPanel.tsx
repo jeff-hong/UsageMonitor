@@ -77,11 +77,12 @@ export function DetailPanel({ onClose }: { onClose: () => void }) {
 
       <div className="total-block">
         <div className="total-num">
-          {loading ? "…" : fmtUsd(summary?.cost_usd ?? 0)}
+          {loading ? "…" : fmtTokens(totalTokens)}
+          <small className="total-unit">tokens</small>
         </div>
         <div className="total-sub">
-          {range === "today" ? "今日" : rangeLabel(range)}花费 ·{" "}
-          {fmtTokens(totalTokens)} tokens
+          {range === "today" ? "今日" : rangeLabel(range)}花费
+          <span className="total-cost">{fmtUsd(summary?.cost_usd ?? 0)}</span>
         </div>
       </div>
 
@@ -168,16 +169,16 @@ export function DetailPanel({ onClose }: { onClose: () => void }) {
         )}
       </div>
 
-      {/* 7-day sparkline */}
+      {/* 7-day trend: each column shows date + bar + tokens + cost */}
       <div className="spark-section">
-        <div className="section-title">近 7 天花费</div>
-        <div className="spark">
-          {buildSparkBars(history)}
-        </div>
-        {history.length >= 2 && (
-          <div className="spark-axis">
-            <span>{history[0]?.date.slice(5)}</span>
-            <span>{history[history.length - 1]?.date.slice(5)}</span>
+        <div className="section-title">近 7 天用量</div>
+        {history.length < 2 ? (
+          <div className="spark-empty">数据不足</div>
+        ) : (
+          <div className="spark-grid">
+            {lastSeven(history).map((d, i) => (
+              <SparkCol key={i} day={d} maxTok={maxTok(history)} />
+            ))}
           </div>
         )}
       </div>
@@ -198,23 +199,38 @@ function rangeLabel(r: Range): string {
   return { today: "今日", week: "本周", month: "本月", all: "全部" }[r];
 }
 
-function buildSparkBars(history: DayPoint[]) {
-  // Take the last 7 days, normalize heights to the max.
-  const last7 = history.slice(-7);
-  if (last7.length === 0) {
-    return <div className="spark-empty">暂无数据</div>;
-  }
-  const max = Math.max(...last7.map((d) => d.cost_usd), 0.01);
+function lastSeven(history: DayPoint[]): DayPoint[] {
+  return history.slice(-7);
+}
+function maxTok(history: DayPoint[]): number {
+  return Math.max(...history.map((d) => d.tokens), 1);
+}
+
+// One column of the 7-day trend: date label, a bar whose height reflects token
+// volume, then the day's token count and dollar cost.
+function SparkCol({
+  day,
+  maxTok,
+}: {
+  day: DayPoint;
+  maxTok: number;
+}) {
   const today = new Date().toISOString().slice(0, 10);
-  return last7.map((d, i) => {
-    const h = Math.max(6, Math.round((d.cost_usd / max) * 100));
-    return (
-      <div
-        key={i}
-        className={`spark-bar ${d.date === today ? "today" : ""}`}
-        style={{ height: `${h}%` }}
-        title={`${d.date}: ${fmtUsd(d.cost_usd)}`}
-      />
-    );
-  });
+  const isToday = day.date === today;
+  const h = Math.max(8, Math.round((day.tokens / maxTok) * 100));
+  return (
+    <div className="spark-col">
+      <div className="spark-col-cost">{fmtUsd(day.cost_usd)}</div>
+      <div className="spark-col-tok">{fmtTokens(day.tokens)}</div>
+      <div className="spark-col-bar-wrap">
+        <div
+          className={`spark-bar ${isToday ? "today" : ""}`}
+          style={{ height: `${h}%` }}
+        />
+      </div>
+      <div className={`spark-col-date ${isToday ? "today" : ""}`}>
+        {day.date.slice(5).replace("-", "/")}
+      </div>
+    </div>
+  );
 }

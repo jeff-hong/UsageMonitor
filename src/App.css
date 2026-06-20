@@ -250,15 +250,28 @@ body {
   margin-top: 10px;
 }
 .detail-panel .total-num {
-  font-size: 36px;
+  font-size: 38px;
   font-weight: 700;
   letter-spacing: -1.5px;
   line-height: 1;
 }
+.detail-panel .total-unit {
+  font-size: 14px;
+  font-weight: 500;
+  opacity: 0.5;
+  margin-left: 6px;
+  letter-spacing: 0;
+}
 .detail-panel .total-sub {
   font-size: 12px;
-  opacity: 0.65;
+  opacity: 0.55;
   margin-top: 4px;
+}
+.detail-panel .total-cost {
+  font-size: 15px;
+  font-weight: 700;
+  opacity: 0.85;
+  margin-left: 8px;
 }
 
 .detail-panel .chip-row {
@@ -393,33 +406,60 @@ body {
   letter-spacing: 0.4px;
   margin-bottom: 8px;
 }
-.detail-panel .spark {
+/* 7-day trend: a row of columns, each = cost + tokens + bar + date */
+.detail-panel .spark-grid {
+  display: flex;
+  gap: 4px;
+}
+.detail-panel .spark-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+.detail-panel .spark-col-cost {
+  font-size: 9px;
+  font-weight: 700;
+  opacity: 0.9;
+}
+.detail-panel .spark-col-tok {
+  font-size: 8px;
+  opacity: 0.5;
+  margin-bottom: 4px;
+}
+.detail-panel .spark-col-bar-wrap {
+  width: 100%;
+  height: 44px;
   display: flex;
   align-items: flex-end;
-  gap: 4px;
-  height: 50px;
+  justify-content: center;
 }
 .detail-panel .spark-bar {
-  flex: 1;
+  width: 70%;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0.15));
   border-radius: 3px 3px 0 0;
   min-height: 4px;
+  transition: height 0.4s ease;
 }
 .detail-panel .spark-bar.today {
   background: linear-gradient(180deg, #34c759, rgba(52, 199, 89, 0.3));
+}
+.detail-panel .spark-col-date {
+  font-size: 8px;
+  opacity: 0.45;
+  margin-top: 4px;
+}
+.detail-panel .spark-col-date.today {
+  color: #34c759;
+  opacity: 0.9;
+  font-weight: 600;
 }
 .detail-panel .spark-empty {
   font-size: 11px;
   opacity: 0.4;
   width: 100%;
   text-align: center;
-}
-.detail-panel .spark-axis {
-  display: flex;
-  justify-content: space-between;
-  font-size: 9px;
-  opacity: 0.4;
-  margin-top: 4px;
 }
 
 .detail-panel .panel-footer {

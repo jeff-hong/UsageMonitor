@@ -129,12 +129,18 @@ impl UsageParser for CodexParser {
                 .or_else(|| info.get("total_token_usage").and_then(|v| v.as_object()));
             let Some(usage) = usage else { continue };
 
-            let input = get_u64(usage, "input_tokens");
+            let mut input = get_u64(usage, "input_tokens");
             let cached = get_u64(usage, "cached_input_tokens");
             let output = get_u64(usage, "output_tokens") + get_u64(usage, "reasoning_output_tokens");
-            // A zero-total delta isn't worth recording.
+            // Codex often leaves the per-field counters at 0 while reporting
+            // the real volume only in `total_tokens`. When that happens, fold
+            // the total into input so the session isn't dropped as empty.
             if input + cached + output == 0 {
-                continue;
+                let total = get_u64(usage, "total_tokens");
+                if total == 0 {
+                    continue;
+                }
+                input = total;
             }
 
             let ts_str = obj.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
@@ -229,6 +235,21 @@ mod tests {
         let parser = CodexParser::with_root(tmp.clone());
         let res = parser.parse_file(&file, 0);
         assert_eq!(res.records.len(), 0, "no real token deltas to record");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn folds_total_tokens_when_fields_are_zero() {
+        // Codex's real-world logs often keep per-field counters at 0 and report
+        // the whole volume only in total_tokens. The parser must not drop these.
+        let tmp = std::env::temp_dir().join(format!("codex-test5-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let line = r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":0,"output_tokens":0,"cached_input_tokens":0,"reasoning_output_tokens":0,"total_tokens":88343}}}}"#;
+        let file = write_jsonl(&tmp, "r.jsonl", &[line]);
+        let parser = CodexParser::with_root(tmp.clone());
+        let res = parser.parse_file(&file, 0);
+        assert_eq!(res.records.len(), 1);
+        assert_eq!(res.records[0].input_tok, 88343, "total folded into input");
         std::fs::remove_dir_all(&tmp).ok();
     }
 

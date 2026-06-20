@@ -323,6 +323,35 @@ mod tests {
     /// from each vendor's public pricing page; CNY converted at ~7.0/USD.
     ///
     /// Run: cargo test --lib db::tests::seed_real_user_pricing -- --ignored --nocapture
+    /// Re-index every file for both tools from offset 0.
+    fn reindex_all(db: &Db) {
+        use crate::parsers::{claude::ClaudeParser, codex::CodexParser, UsageParser};
+        let parsers: Vec<Box<dyn UsageParser + Send>> = vec![
+            Box::new(ClaudeParser::new()),
+            Box::new(CodexParser::new()),
+        ];
+        for p in &parsers {
+            for f in p.discover_files() {
+                let r = p.parse_file(&f, 0);
+                if !r.records.is_empty() {
+                    crate::indexer::upsert_records(db, &r.records);
+                }
+            }
+        }
+    }
+
+    /// Re-index only codex files (after wiping codex rows + offsets).
+    fn reindex_codex(db: &Db) {
+        use crate::parsers::{codex::CodexParser, UsageParser};
+        let p = CodexParser::new();
+        for f in p.discover_files() {
+            let r = p.parse_file(&f, 0);
+            if !r.records.is_empty() {
+                crate::indexer::upsert_records(db, &r.records);
+            }
+        }
+    }
+
     #[test]
     #[ignore]
     fn seed_real_user_pricing() {
@@ -365,6 +394,9 @@ mod tests {
             println!("seeded {} custom prices", prices.len());
         }
         // Index real usage data into this live DB if it's empty (first run).
+        // Also re-index Codex when the parser changes — old rows carried the
+        // pre-fix token counts, so wipe codex rows + their file_state offsets
+        // and re-parse from scratch.
         let conn = db.lock();
         let have: i64 = conn
             .query_row("SELECT COUNT(*) FROM usage_records", [], |r| r.get(0))
@@ -372,25 +404,16 @@ mod tests {
         drop(conn);
         if have == 0 {
             println!("live DB empty — indexing real data…");
-            use crate::parsers::{claude::ClaudeParser, codex::CodexParser, UsageParser};
-            let parsers: Vec<Box<dyn UsageParser + Send>> = vec![
-                Box::new(ClaudeParser::new()),
-                Box::new(CodexParser::new()),
-            ];
-            for p in &parsers {
-                for f in p.discover_files() {
-                    let r = p.parse_file(&f, 0);
-                    if !r.records.is_empty() {
-                        crate::indexer::upsert_records(&db, &r.records);
-                    }
-                }
-            }
-            let conn = db.lock();
-            let n: i64 = conn
-                .query_row("SELECT COUNT(*) FROM usage_records", [], |r| r.get(0))
-                .unwrap_or(0);
-            println!("indexed {n} real records");
+            reindex_all(&db);
         }
+        // Force a codex re-index to pick up parser fixes (token accuracy).
+        {
+            let conn = db.lock();
+            let _ = conn.execute("DELETE FROM usage_records WHERE tool='codex'", []);
+            let _ = conn.execute("DELETE FROM file_state WHERE tool='codex'", []);
+        }
+        println!("re-indexing codex with fixed parser…");
+        reindex_codex(&db);
         // Recompute every usage record's cost from the now-populated pricing.
         crate::indexer::recompute_all(&db);
         let conn = db.lock();
