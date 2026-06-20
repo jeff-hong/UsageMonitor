@@ -366,9 +366,18 @@ mod tests {
             // (glm-5.x etc.) belonged to THIS conversation's own logs, not the
             // user's daily Claude/Codex history. Kept below for completeness.
             let prices: &[(&str, f64, f64, f64)] = &[
-                // Real keys present in usage data
-                ("<synthetic>", 3.0, 15.0, 0.30),   // Claude Code default (sonnet tier)
-                ("openai", 1.25, 10.0, 0.125),       // Codex default (GPT-5 tier)
+                // Anthropic Claude (official rates, USD per 1M tokens)
+                // opus-4.8 / fable-5 are the top tier; opus-4.7 the cheaper one.
+                ("claude-opus-4-8", 10.0, 50.0, 1.0),
+                ("claude-opus-4.8", 10.0, 50.0, 1.0),
+                ("claude-fable-5", 10.0, 50.0, 1.0),
+                ("claude-opus-4-7", 5.0, 25.0, 0.5),
+                ("claude-sonnet-4-6", 3.0, 15.0, 0.3),
+                ("claude-haiku-4-5-20251001", 1.0, 5.0, 0.1),
+                ("<synthetic>", 3.0, 15.0, 0.3), // fallback placeholder
+                // OpenAI / Codex
+                ("gpt-5.5", 1.25, 10.0, 0.125),
+                ("openai", 1.25, 10.0, 0.125), // codex placeholder
                 // Zhipu GLM (public rates, CNY ~7/USD)
                 ("glm-5.2", 1.14, 4.0, 0.29),
                 ("glm-5.1", 0.517, 4.40, 0.10),
@@ -379,14 +388,6 @@ mod tests {
                 // ByteDance Doubao (volcengine, 1.2/16 CNY)
                 ("doubao-seed-code", 0.17, 2.29, 0.10),
                 ("doubao-seed-2.0-code", 0.17, 2.29, 0.10),
-                // OpenAI / Anthropic variants
-                ("gpt-5.5", 1.25, 10.0, 0.125),
-                ("claude-opus-4-8", 15.0, 75.0, 1.5),
-                ("claude-opus-4-7", 15.0, 75.0, 1.5),
-                ("claude-opus-4.8", 15.0, 75.0, 1.5),
-                ("claude-sonnet-4-6", 3.0, 15.0, 0.30),
-                ("claude-haiku-4-5-20251001", 0.80, 4.0, 0.08),
-                ("claude-fable-5", 3.0, 15.0, 0.30),
             ];
             for (m, i, o, c) in prices {
                 upsert_pricing(&conn, m, *i, *o, *c).unwrap();
@@ -397,23 +398,28 @@ mod tests {
         // Also re-index Codex when the parser changes — old rows carried the
         // pre-fix token counts, so wipe codex rows + their file_state offsets
         // and re-parse from scratch.
-        let conn = db.lock();
-        let have: i64 = conn
-            .query_row("SELECT COUNT(*) FROM usage_records", [], |r| r.get(0))
-            .unwrap_or(0);
-        drop(conn);
-        if have == 0 {
-            println!("live DB empty — indexing real data…");
-            reindex_all(&db);
-        }
-        // Force a codex re-index to pick up parser fixes (token accuracy).
+        // Wipe + rebuild once to recover from the earlier "<synthetic>" model
+        // bug, then recompute costs. On later runs this is harmless (idempotent
+        // upsert by source_file+session+timestamp).
         {
             let conn = db.lock();
-            let _ = conn.execute("DELETE FROM usage_records WHERE tool='codex'", []);
-            let _ = conn.execute("DELETE FROM file_state WHERE tool='codex'", []);
+            let needs_rebuild: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM usage_records WHERE model='<synthetic>' AND tool='claude'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            drop(conn);
+            if needs_rebuild > 0 {
+                println!("detected {needs_rebuild} buggy <synthetic> claude rows — full rebuild…");
+                let conn = db.lock();
+                let _ = conn.execute("DELETE FROM usage_records", []);
+                let _ = conn.execute("DELETE FROM file_state", []);
+                drop(conn);
+                reindex_all(&db);
+            }
         }
-        println!("re-indexing codex with fixed parser…");
-        reindex_codex(&db);
         // Recompute every usage record's cost from the now-populated pricing.
         crate::indexer::recompute_all(&db);
         let conn = db.lock();
@@ -428,6 +434,124 @@ mod tests {
             )
             .unwrap();
         println!("records: {total}, priced: {priced}, total cost: ${cost:.4}");
+    }
+
+    /// Read cc-switch's own database and dump its schema + today's totals, so we
+    /// can compare its token/cost figures against ours and find the discrepancy.
+    ///
+    /// Run: cargo test --lib db::tests::inspect_ccswitch -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn inspect_ccswitch() {
+        let path = dirs::home_dir()
+            .map(|h| h.join(".cc-switch").join("cc-switch.db"))
+            .expect("home dir");
+        let conn = Connection::open(&path).expect("open cc-switch.db");
+
+        // List every table.
+        println!("=== cc-switch tables ===");
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            .unwrap();
+        let tables: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        for t in &tables {
+            println!("  {t}");
+        }
+
+        // For each table, show its columns + row count + a sample row.
+        for t in &tables {
+            println!("\n=== table: {t} ===");
+            let info: Vec<(String, String)> = conn
+                .prepare(&format!("PRAGMA table_info({t})"))
+                .unwrap()
+                .query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+                .unwrap()
+                .filter_map(Result::ok)
+                .collect();
+            print!("  cols: ");
+            for (c, ty) in &info {
+                print!("{c}({ty}) ");
+            }
+            println!();
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| r.get(0))
+                .unwrap_or(0);
+            println!("  rows: {count}");
+            if count > 0 {
+                let col_names: Vec<&str> = info.iter().map(|(c, _)| c.as_str()).collect();
+                let cols = col_names.join(", ");
+                if let Ok(row) = conn.query_row(&format!("SELECT {cols} FROM {t} LIMIT 1"), [], |r| {
+                    let mut vals = Vec::new();
+                    for i in 0..info.len() {
+                        let v: String = r.get_ref(i).ok().and_then(|r| {
+                            match r {
+                                rusqlite::types::ValueRef::Integer(n) => Some(n.to_string()),
+                                rusqlite::types::ValueRef::Real(n) => Some(n.to_string()),
+                                rusqlite::types::ValueRef::Text(s) => Some(String::from_utf8_lossy(s).into_owned()),
+                                rusqlite::types::ValueRef::Null => Some("NULL".into()),
+                                rusqlite::types::ValueRef::Blob(_) => Some("<blob>".into()),
+                            }
+                        }).unwrap_or_default();
+                        vals.push(format!("{}={}", col_names[i], v));
+                    }
+                    Ok(vals.join(", "))
+                }) {
+                    println!("  sample: {row}");
+                }
+            }
+        }
+
+        // Direct comparison: cc-switch's TODAY totals vs how it breaks down.
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        println!("\n=== cc-switch proxy_request_logs for TODAY ({today}) ===");
+        let today_ts_start = chrono::Local::now()
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        let today_ts_end = today_ts_start + 86400;
+        let (cnt, inp, outp, cr, cc): (i64, i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*),
+                        COALESCE(SUM(input_tokens),0),
+                        COALESCE(SUM(output_tokens),0),
+                        COALESCE(SUM(cache_read_tokens),0),
+                        COALESCE(SUM(cache_creation_tokens),0)
+                 FROM proxy_request_logs
+                 WHERE created_at >= ?1 AND created_at < ?2",
+                rusqlite::params![today_ts_start, today_ts_end],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        println!(
+            "  today requests: {cnt}, input: {inp}, output: {outp}, cache_read: {cr}, cache_create: {cc}"
+        );
+
+        // Distinct models cc-switch saw today (so we know the real model names).
+        println!("\n=== distinct models in proxy_request_logs today ===");
+        let mut s = conn
+            .prepare(
+                "SELECT model, COUNT(*), SUM(input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens)
+                 FROM proxy_request_logs
+                 WHERE created_at >= ?1 AND created_at < ?2
+                 GROUP BY model ORDER BY 3 DESC",
+            )
+            .unwrap();
+        let models: Vec<(String, i64, i64)> = s
+            .query_map(rusqlite::params![today_ts_start, today_ts_end], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2).unwrap_or(0)))
+            })
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        for (m, c, t) in &models {
+            println!("  {m}: {c} requests, {t} tokens");
+        }
     }
 }
 

@@ -35,8 +35,29 @@ pub struct IndexProgress {
 /// events to `app` as it goes.
 pub fn initial_full_index(db: Db, app: AppHandle) {
     if is_indexed(&db) {
-        let _ = app.emit("index-progress", IndexProgress { indexed: 0, total: 0, done: true });
-        return;
+        // One-time data fix: older parser versions recorded Claude's model as
+        // "<synthetic>" for nearly every record, so prices never matched. If we
+        // spot that, wipe and rebuild with the current parser before continuing.
+        let needs_fix = {
+            let conn = db.lock();
+            conn.query_row(
+                "SELECT COUNT(*) FROM usage_records WHERE model='<synthetic>' AND tool='claude'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+        };
+        if needs_fix > 0 {
+            tracing::info!("rebuilding index to fix {needs_fix} <synthetic> claude rows");
+            {
+                let conn = db.lock();
+                let _ = conn.execute("DELETE FROM usage_records", []);
+                let _ = conn.execute("DELETE FROM file_state", []);
+            }
+        } else {
+            let _ = app.emit("index-progress", IndexProgress { indexed: 0, total: 0, done: true });
+            return;
+        }
     }
 
     let parsers: Vec<Box<dyn UsageParser + Send>> = vec![
