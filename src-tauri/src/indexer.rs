@@ -234,6 +234,20 @@ fn compute_cost(
     (cost, true)
 }
 
+/// Re-derive every usage record's cost from the current pricing table. Called
+/// when the user edits/adds prices. A single UPDATE beats per-row Rust loops.
+pub fn recompute_all(db: &Db) {
+    let conn = db.lock();
+    let _ = conn.execute(
+        "UPDATE usage_records SET
+            cost_usd = input_tok/1000000.0 * (SELECT in_per_mtok   FROM pricing p WHERE p.model = usage_records.model)
+                      + output_tok/1000000.0 * (SELECT out_per_mtok  FROM pricing p WHERE p.model = usage_records.model)
+                      + cache_tok/1000000.0  * (SELECT cache_per_mtok FROM pricing p WHERE p.model = usage_records.model),
+            priced = CASE WHEN EXISTS(SELECT 1 FROM pricing p WHERE p.model = usage_records.model) THEN 1 ELSE 0 END",
+        [],
+    );
+}
+
 fn get_setting(conn: &Connection, key: &str) -> Option<String> {
     conn.query_row(
         "SELECT value FROM settings WHERE key = ?1",
@@ -336,7 +350,6 @@ mod tests {
             Box::new(crate::parsers::codex::CodexParser::new()),
         ];
         let mut total_records = 0usize;
-        let mut total_cost = 0.0;
         let mut files = 0usize;
         for p in &parsers {
             for f in p.discover_files() {
@@ -344,10 +357,6 @@ mod tests {
                 files += 1;
                 if !r.records.is_empty() {
                     total_records += r.records.len();
-                    for rec in &r.records {
-                        let pricing = std::collections::HashMap::<String, (f64,f64,f64)>::new();
-                        let _ = pricing; // cost via upsert, not here
-                    }
                     upsert_records(&db, &r.records);
                 }
             }
@@ -358,7 +367,7 @@ mod tests {
                 Ok((r.get(0)?, r.get(1)?))
             })
             .unwrap();
-        println!("files: {files}, records in db: {n}, total cost: ${cost:.4}");
+        println!("files: {files}, parsed: {total_records}, in db: {n}, cost: ${cost:.4}");
         assert!(n > 0, "expected real records indexed");
         std::fs::remove_dir_all(&dir).ok();
     }

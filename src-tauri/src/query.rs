@@ -267,16 +267,8 @@ pub fn get_projects(state: tauri::State<'_, Db>) -> Vec<ProjectRow> {
 #[tauri::command]
 pub fn recompute_cost(state: tauri::State<'_, Db>) {
     // Re-derive every row's cost from the current pricing table. Triggered when
-    // the user edits prices in settings.
-    let conn = state.lock();
-    let _ = conn.execute(
-        "UPDATE usage_records SET
-            cost_usd = input_tok/1000000.0 * (SELECT in_per_mtok   FROM pricing p WHERE p.model = usage_records.model)
-                      + output_tok/1000000.0 * (SELECT out_per_mtok  FROM pricing p WHERE p.model = usage_records.model)
-                      + cache_tok/1000000.0  * (SELECT cache_per_mtok FROM pricing p WHERE p.model = usage_records.model),
-            priced = CASE WHEN EXISTS(SELECT 1 FROM pricing p WHERE p.model = usage_records.model) THEN 1 ELSE 0 END",
-        [],
-    );
+    // the user edits prices in settings. Shares the SQL with the seed tooling.
+    crate::indexer::recompute_all(&state);
 }
 
 /// Insert or update one model's price. Used by the settings page to add custom

@@ -205,6 +205,27 @@ pub(crate) fn set_setting_raw(conn: &Connection, key: &str, value: &str) -> Resu
     Ok(())
 }
 
+/// Insert or update a pricing row (marked non-builtin). Public so the query
+/// command layer and seed tooling can both reach it.
+pub fn upsert_pricing(
+    conn: &Connection,
+    model: &str,
+    in_per_mtok: f64,
+    out_per_mtok: f64,
+    cache_per_mtok: f64,
+) -> Result<(), DbError> {
+    conn.execute(
+        "INSERT INTO pricing (model, in_per_mtok, out_per_mtok, cache_per_mtok, builtin)
+         VALUES (?1, ?2, ?3, ?4, 0)
+         ON CONFLICT(model) DO UPDATE SET
+            in_per_mtok = excluded.in_per_mtok,
+            out_per_mtok = excluded.out_per_mtok,
+            cache_per_mtok = excluded.cache_per_mtok",
+        rusqlite::params![model, in_per_mtok, out_per_mtok, cache_per_mtok],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,6 +316,95 @@ mod tests {
             .query_row("SELECT value FROM settings WHERE key='db_version'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(v, DB_VERSION.to_string());
+    }
+
+    /// Seed real-user custom model prices into the LIVE app database (AppData),
+    /// then recompute costs so dollar amounts appear in the UI. Values sourced
+    /// from each vendor's public pricing page; CNY converted at ~7.0/USD.
+    ///
+    /// Run: cargo test --lib db::tests::seed_real_user_pricing -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn seed_real_user_pricing() {
+        let db = Db::open().expect("open live db");
+        {
+            let conn = db.lock();
+            // (model, in, out, cache) USD per 1M tokens.
+            // The user's real history only carries two model keys:
+            //   <synthetic>  — Claude Code's placeholder for unreported models
+            //   openai       — Codex's provider key (no concrete model in logs)
+            // So we price those two directly. The fancy names found earlier
+            // (glm-5.x etc.) belonged to THIS conversation's own logs, not the
+            // user's daily Claude/Codex history. Kept below for completeness.
+            let prices: &[(&str, f64, f64, f64)] = &[
+                // Real keys present in usage data
+                ("<synthetic>", 3.0, 15.0, 0.30),   // Claude Code default (sonnet tier)
+                ("openai", 1.25, 10.0, 0.125),       // Codex default (GPT-5 tier)
+                // Zhipu GLM (public rates, CNY ~7/USD)
+                ("glm-5.2", 1.14, 4.0, 0.29),
+                ("glm-5.1", 0.517, 4.40, 0.10),
+                ("glm-4.5-air", 0.11, 0.29, 0.05),
+                // DeepSeek (V3 / V3.2 rates)
+                ("deepseek-v4-pro", 0.14, 0.42, 0.028),
+                ("deepseek-v3-2", 0.14, 0.42, 0.028),
+                // ByteDance Doubao (volcengine, 1.2/16 CNY)
+                ("doubao-seed-code", 0.17, 2.29, 0.10),
+                ("doubao-seed-2.0-code", 0.17, 2.29, 0.10),
+                // OpenAI / Anthropic variants
+                ("gpt-5.5", 1.25, 10.0, 0.125),
+                ("claude-opus-4-8", 15.0, 75.0, 1.5),
+                ("claude-opus-4-7", 15.0, 75.0, 1.5),
+                ("claude-opus-4.8", 15.0, 75.0, 1.5),
+                ("claude-sonnet-4-6", 3.0, 15.0, 0.30),
+                ("claude-haiku-4-5-20251001", 0.80, 4.0, 0.08),
+                ("claude-fable-5", 3.0, 15.0, 0.30),
+            ];
+            for (m, i, o, c) in prices {
+                upsert_pricing(&conn, m, *i, *o, *c).unwrap();
+            }
+            println!("seeded {} custom prices", prices.len());
+        }
+        // Index real usage data into this live DB if it's empty (first run).
+        let conn = db.lock();
+        let have: i64 = conn
+            .query_row("SELECT COUNT(*) FROM usage_records", [], |r| r.get(0))
+            .unwrap_or(0);
+        drop(conn);
+        if have == 0 {
+            println!("live DB empty — indexing real data…");
+            use crate::parsers::{claude::ClaudeParser, codex::CodexParser, UsageParser};
+            let parsers: Vec<Box<dyn UsageParser + Send>> = vec![
+                Box::new(ClaudeParser::new()),
+                Box::new(CodexParser::new()),
+            ];
+            for p in &parsers {
+                for f in p.discover_files() {
+                    let r = p.parse_file(&f, 0);
+                    if !r.records.is_empty() {
+                        crate::indexer::upsert_records(&db, &r.records);
+                    }
+                }
+            }
+            let conn = db.lock();
+            let n: i64 = conn
+                .query_row("SELECT COUNT(*) FROM usage_records", [], |r| r.get(0))
+                .unwrap_or(0);
+            println!("indexed {n} real records");
+        }
+        // Recompute every usage record's cost from the now-populated pricing.
+        crate::indexer::recompute_all(&db);
+        let conn = db.lock();
+        let (total, priced, cost): (i64, i64, f64) = conn
+            .query_row(
+                "SELECT COUNT(*),
+                        SUM(CASE WHEN priced=1 THEN 1 ELSE 0 END),
+                        COALESCE(SUM(cost_usd),0)
+                 FROM usage_records",
+                [],
+                |r| Ok((r.get(0)?, r.get::<_, i64>(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        println!("records: {total}, priced: {priced}, total cost: ${cost:.4}");
     }
 }
 
