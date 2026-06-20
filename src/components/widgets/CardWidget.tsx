@@ -34,7 +34,7 @@ export function CardWidget({
   return (
     <div className="glass-card widget-card" data-tauri-drag-region>
       <div className="label-tiny" data-tauri-drag-region>今日</div>
-      <div className="big-num" data-tauri-drag-region>
+      <div className="big-num clickable" onClick={onOpenDetail} title="点击查看详情">
         {loading ? "…" : fmtTokens(tokens)}
         <small className="big-unit">tokens</small>
       </div>
