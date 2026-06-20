@@ -68,10 +68,23 @@ body {
   line-height: 1;
   margin-top: 6px;
 }
+.widget-card .big-unit {
+  font-size: 13px;
+  font-weight: 500;
+  opacity: 0.5;
+  margin-left: 6px;
+  letter-spacing: 0;
+}
 .widget-card .token-total {
   font-size: 12px;
-  opacity: 0.6;
+  opacity: 0.55;
   margin-top: 4px;
+}
+.widget-card .cost-small {
+  font-size: 14px;
+  font-weight: 700;
+  opacity: 0.9;
+  margin-left: 4px;
 }
 .widget-card .tool-rows {
   margin-top: 14px;

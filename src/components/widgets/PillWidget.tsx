@@ -26,7 +26,7 @@ export function PillWidget({
     <div
       className="glass-card widget-pill"
       data-tauri-drag-region
-      onDoubleClick={onOpenDetail}
+      onClick={onOpenDetail}
     >
       <div className="pill-seg" data-tauri-drag-region>
         <span className="label-tiny">花费</span>

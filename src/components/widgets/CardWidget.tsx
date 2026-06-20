@@ -29,16 +29,17 @@ export function CardWidget({
     <div
       className="glass-card widget-card"
       data-tauri-drag-region
-      onDoubleClick={onOpenDetail}
+      onClick={onOpenDetail}
     >
       <div className="label-tiny" data-tauri-drag-region>
         今日
       </div>
       <div className="big-num" data-tauri-drag-region>
-        {loading ? "…" : priced ? fmtUsd(cost) : `${fmtUsd(cost)}*`}
+        {loading ? "…" : fmtTokens(tokens)}
+        <small className="big-unit">tokens</small>
       </div>
       <div className="token-total" data-tauri-drag-region>
-        {fmtTokens(tokens)} tokens
+        花费 <span className="cost-small">{priced ? fmtUsd(cost) : `${fmtUsd(cost)}*`}</span>
       </div>
 
       <div className="tool-rows">
@@ -59,7 +60,7 @@ export function CardWidget({
           );
         })}
       </div>
-      <div className="hint">双击查看详情</div>
+      <div className="hint">点击查看详情</div>
     </div>
   );
 }

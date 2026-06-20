@@ -7,16 +7,16 @@ import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import "./App.css";
 import { CardWidget } from "./components/widgets/CardWidget";
 import { PillWidget } from "./components/widgets/PillWidget";
-import { GaugeWidget } from "./components/widgets/GaugeWidget";
 import { DetailPanel } from "./components/DetailPanel";
 import { SettingsPage } from "./components/SettingsPage";
 import { useTodaySummary } from "./hooks/useTodaySummary";
 
-type WidgetShape = "card" | "pill" | "gauge";
+type WidgetShape = "card" | "pill";
 
 function loadShape(): WidgetShape {
   const s = localStorage.getItem("widget_shape");
-  return s === "pill" || s === "gauge" || s === "card" ? s : "card";
+  // Only card/pill remain; gauge was removed — fall back to card.
+  return s === "pill" || s === "card" ? s : "card";
 }
 
 // Thin edges + corners that drive native window resizing on a frameless
@@ -92,8 +92,7 @@ function App() {
   };
 
   const cycleShape = () => {
-    const next: WidgetShape =
-      shape === "card" ? "pill" : shape === "pill" ? "gauge" : "card";
+    const next: WidgetShape = shape === "card" ? "pill" : "card";
     setShape(next);
     localStorage.setItem("widget_shape", next);
     // Nudge to a sensible default size for the new shape, but the user can
@@ -101,7 +100,6 @@ function App() {
     const sizes = {
       card: { width: 240, height: 300 },
       pill: { width: 340, height: 90 },
-      gauge: { width: 200, height: 240 },
     };
     getCurrentWindow()
       .setSize(new LogicalSize(sizes[next].width, sizes[next].height))
@@ -115,9 +113,6 @@ function App() {
       )}
       {shape === "pill" && (
         <PillWidget summary={summary} loading={loading} onOpenDetail={open} />
-      )}
-      {shape === "gauge" && (
-        <GaugeWidget summary={summary} loading={loading} onOpenDetail={open} />
       )}
       <div className="shape-cycle" onClick={cycleShape} title="切换悬浮窗样式">
         ⇄

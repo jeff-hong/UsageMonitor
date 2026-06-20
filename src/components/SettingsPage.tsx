@@ -6,10 +6,10 @@
 import { useEffect, useState } from "react";
 import { api, fmtTokens, type Pricing, type UnpricedModel } from "../lib/api";
 
-type WidgetShape = "card" | "pill" | "gauge";
+type WidgetShape = "card" | "pill";
 type TaskbarMode = "tray" | "live_number" | "off";
 
-const WIDGET_LABEL: Record<WidgetShape, string> = { card: "卡片", pill: "胶囊", gauge: "仪表盘" };
+const WIDGET_LABEL: Record<WidgetShape, string> = { card: "卡片", pill: "胶囊" };
 const TASKBAR_LABEL: Record<TaskbarMode, string> = {
   tray: "托盘图标",
   live_number: "实时数字",
@@ -107,13 +107,13 @@ export function SettingsPage({
       {/* display modes */}
       <Section title="悬浮窗样式">
         <div className="seg-tabs">
-          {(["card", "pill", "gauge", "hidden"] as const).map((s) => (
+          {(["card", "pill"] as const).map((s) => (
             <div
               key={s}
               className={`tab ${shape === s ? "active" : ""}`}
-              onClick={() => s !== "hidden" && pickShape(s as WidgetShape)}
+              onClick={() => pickShape(s as WidgetShape)}
             >
-              {s === "hidden" ? "隐藏" : WIDGET_LABEL[s as WidgetShape]}
+              {WIDGET_LABEL[s]}
             </div>
           ))}
         </div>
