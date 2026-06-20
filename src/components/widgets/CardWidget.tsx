@@ -60,9 +60,6 @@ export function CardWidget({
           );
         })}
       </div>
-      <button className="open-detail-btn" onClick={onOpenDetail}>
-        点击查看详情 →
-      </button>
     </div>
   );
 }
