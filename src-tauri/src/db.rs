@@ -436,121 +436,98 @@ mod tests {
         println!("records: {total}, priced: {priced}, total cost: ${cost:.4}");
     }
 
-    /// Read cc-switch's own database and dump its schema + today's totals, so we
-    /// can compare its token/cost figures against ours and find the discrepancy.
+    /// Show today's per-tool data in our own DB, to debug why the widget only
+    /// shows Claude.
+    /// Run: cargo test --lib db::tests::check_today_ours -- --ignored --nocapture
+
+    /// Dump cc-switch's proxy_request_logs schema + samples so we can map its
+    /// columns onto ours when reading it as a data source.
     ///
     /// Run: cargo test --lib db::tests::inspect_ccswitch -- --ignored --nocapture
     #[test]
     #[ignore]
     fn inspect_ccswitch() {
+
         let path = dirs::home_dir()
             .map(|h| h.join(".cc-switch").join("cc-switch.db"))
             .expect("home dir");
         let conn = Connection::open(&path).expect("open cc-switch.db");
 
-        // List every table.
-        println!("=== cc-switch tables ===");
-        let mut stmt = conn
-            .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-            .unwrap();
-        let tables: Vec<String> = stmt
-            .query_map([], |r| r.get::<_, String>(0))
+        // Full column list of the table we'll read from.
+        println!("=== proxy_request_logs columns ===");
+        let info: Vec<(String, String)> = conn
+            .prepare("PRAGMA table_info(proxy_request_logs)")
+            .unwrap()
+            .query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
             .unwrap()
             .filter_map(Result::ok)
             .collect();
-        for t in &tables {
-            println!("  {t}");
+        for (c, ty) in &info {
+            println!("  {c}  ({ty})");
+        }
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM proxy_request_logs", [], |r| r.get(0))
+            .unwrap();
+        println!("total rows: {count}");
+
+        // A few real rows so we see actual values for project/session/cost.
+        println!("\n=== sample rows (5) ===");
+        let col_names: Vec<String> = info.iter().map(|(c, _)| c.clone()).collect();
+        let cols = col_names.join(", ");
+        let mut stmt = conn.prepare(&format!("SELECT {cols} FROM proxy_request_logs ORDER BY created_at DESC LIMIT 5")).unwrap();
+        let rows = stmt.query_map([], |r| {
+            let mut vals = Vec::new();
+            for i in 0..col_names.len() {
+                let v = match r.get_ref(i)? {
+                    rusqlite::types::ValueRef::Integer(n) => n.to_string(),
+                    rusqlite::types::ValueRef::Real(n) => format!("{n:.4}"),
+                    rusqlite::types::ValueRef::Text(s) => String::from_utf8_lossy(s).into_owned(),
+                    rusqlite::types::ValueRef::Null => "NULL".into(),
+                    rusqlite::types::ValueRef::Blob(_) => "<blob>".into(),
+                };
+                vals.push(format!("{}={}", col_names[i], v));
+            }
+            Ok(vals.join(" | "))
+        }).unwrap();
+        for row in rows {
+            println!("  {}", row.unwrap());
         }
 
-        // For each table, show its columns + row count + a sample row.
-        for t in &tables {
-            println!("\n=== table: {t} ===");
-            let info: Vec<(String, String)> = conn
-                .prepare(&format!("PRAGMA table_info({t})"))
-                .unwrap()
-                .query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+        // What distinct values appear in the key categorical columns?
+        for col in ["app_type", "data_source", "provider_id", "status"] {
+            println!("\n=== distinct {col} ===");
+            let mut s = conn
+                .prepare(&format!("SELECT {col}, COUNT(*) FROM proxy_request_logs GROUP BY {col} ORDER BY 2 DESC"))
+                .unwrap();
+            let vals: Vec<(String, i64)> = s
+                .query_map([], |r| {
+                    let v: Option<String> = r.get(0).ok();
+                    Ok((v.unwrap_or_else(|| "NULL".into()), r.get(1)?))
+                })
                 .unwrap()
                 .filter_map(Result::ok)
                 .collect();
-            print!("  cols: ");
-            for (c, ty) in &info {
-                print!("{c}({ty}) ");
-            }
-            println!();
-            let count: i64 = conn
-                .query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| r.get(0))
-                .unwrap_or(0);
-            println!("  rows: {count}");
-            if count > 0 {
-                let col_names: Vec<&str> = info.iter().map(|(c, _)| c.as_str()).collect();
-                let cols = col_names.join(", ");
-                if let Ok(row) = conn.query_row(&format!("SELECT {cols} FROM {t} LIMIT 1"), [], |r| {
-                    let mut vals = Vec::new();
-                    for i in 0..info.len() {
-                        let v: String = r.get_ref(i).ok().and_then(|r| {
-                            match r {
-                                rusqlite::types::ValueRef::Integer(n) => Some(n.to_string()),
-                                rusqlite::types::ValueRef::Real(n) => Some(n.to_string()),
-                                rusqlite::types::ValueRef::Text(s) => Some(String::from_utf8_lossy(s).into_owned()),
-                                rusqlite::types::ValueRef::Null => Some("NULL".into()),
-                                rusqlite::types::ValueRef::Blob(_) => Some("<blob>".into()),
-                            }
-                        }).unwrap_or_default();
-                        vals.push(format!("{}={}", col_names[i], v));
-                    }
-                    Ok(vals.join(", "))
-                }) {
-                    println!("  sample: {row}");
-                }
+            for (v, c) in &vals {
+                println!("  {v}: {c}");
             }
         }
 
-        // Direct comparison: cc-switch's TODAY totals vs how it breaks down.
-        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-        println!("\n=== cc-switch proxy_request_logs for TODAY ({today}) ===");
-        let today_ts_start = chrono::Local::now()
-            .date_naive()
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .and_utc()
-            .timestamp();
-        let today_ts_end = today_ts_start + 86400;
-        let (cnt, inp, outp, cr, cc): (i64, i64, i64, i64, i64) = conn
-            .query_row(
-                "SELECT COUNT(*),
-                        COALESCE(SUM(input_tokens),0),
-                        COALESCE(SUM(output_tokens),0),
-                        COALESCE(SUM(cache_read_tokens),0),
-                        COALESCE(SUM(cache_creation_tokens),0)
-                 FROM proxy_request_logs
-                 WHERE created_at >= ?1 AND created_at < ?2",
-                rusqlite::params![today_ts_start, today_ts_end],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )
-            .unwrap();
-        println!(
-            "  today requests: {cnt}, input: {inp}, output: {outp}, cache_read: {cr}, cache_create: {cc}"
-        );
-
-        // Distinct models cc-switch saw today (so we know the real model names).
-        println!("\n=== distinct models in proxy_request_logs today ===");
+        // Distinct projects (so we know what field holds the working dir).
+        println!("\n=== distinct models + their cost fields ===");
         let mut s = conn
-            .prepare(
-                "SELECT model, COUNT(*), SUM(input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens)
-                 FROM proxy_request_logs
-                 WHERE created_at >= ?1 AND created_at < ?2
-                 GROUP BY model ORDER BY 3 DESC",
-            )
+            .prepare("SELECT model, COUNT(*), COALESCE(SUM(total_cost_usd),0), COALESCE(AVG(total_cost_usd),0)
+                      FROM proxy_request_logs GROUP BY model ORDER BY 2 DESC LIMIT 10")
             .unwrap();
-        let models: Vec<(String, i64, i64)> = s
-            .query_map(rusqlite::params![today_ts_start, today_ts_end], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2).unwrap_or(0)))
+        let vals: Vec<(String, i64, f64, f64)> = s
+            .query_map([], |r| {
+                Ok((r.get::<_, Option<String>>(0).unwrap_or_default().unwrap_or_else(|| "NULL".into()),
+                     r.get(1)?, r.get(2)?, r.get(3)?))
             })
             .unwrap()
             .filter_map(Result::ok)
             .collect();
-        for (m, c, t) in &models {
-            println!("  {m}: {c} requests, {t} tokens");
+        for (m, c, tot, avg) in &vals {
+            println!("  {m}: {c} reqs, total_cost=${tot:.4}, avg=${avg:.4}");
         }
     }
 }

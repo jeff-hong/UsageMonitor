@@ -60,6 +60,7 @@ body {
   display: flex;
   flex-direction: column;
   cursor: grab;
+  overflow-y: auto;
 }
 .widget-card .big-num {
   font-size: 32px;
@@ -115,11 +116,10 @@ body {
   font-variant-numeric: tabular-nums;
 }
 .widget-card .hint {
-  margin-top: auto;
+  margin-top: 12px;
   font-size: 10px;
   opacity: 0.35;
   text-align: center;
-  padding-top: 10px;
 }
 
 /* ===================== Pill widget ===================== */

@@ -1,6 +1,7 @@
 // Card widget: the default compact form. Vertical glass card showing today's
 // cost large, with a one-line breakdown per tool. Drag handle is the whole card.
 
+import { useRef } from "react";
 import { type Summary, fmtUsd, fmtTokens } from "../../lib/api";
 
 const TOOL_COLOR: Record<string, string> = {
@@ -25,11 +26,26 @@ export function CardWidget({
   const cost = summary?.cost_usd ?? 0;
   const priced = summary?.fully_priced ?? true;
 
+  // Distinguish a click from a drag: if the pointer moved more than a few px
+  // between mousedown and mouseup, treat it as a drag and don't open detail.
+  const down = useRef<{ x: number; y: number } | null>(null);
+  const onMouseDown = (e: React.MouseEvent) => {
+    down.current = { x: e.clientX, y: e.clientY };
+  };
+  const onMouseUp = (e: React.MouseEvent) => {
+    if (!down.current) return;
+    const dx = Math.abs(e.clientX - down.current.x);
+    const dy = Math.abs(e.clientY - down.current.y);
+    down.current = null;
+    if (dx < 5 && dy < 5) onOpenDetail();
+  };
+
   return (
     <div
       className="glass-card widget-card"
       data-tauri-drag-region
-      onClick={onOpenDetail}
+      onMouseDown={onMouseDown}
+      onMouseUp={onMouseUp}
     >
       <div className="label-tiny" data-tauri-drag-region>
         今日
