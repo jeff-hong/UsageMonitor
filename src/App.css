@@ -125,11 +125,21 @@ body {
   opacity: 0.75;
   font-variant-numeric: tabular-nums;
 }
-.widget-card .hint {
-  margin-top: 12px;
-  font-size: 10px;
-  opacity: 0.35;
+.widget-card .open-detail-btn {
+  margin-top: auto;
+  padding-top: 14px;
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
   text-align: center;
+  font-family: inherit;
+}
+.widget-card .open-detail-btn:hover {
+  color: #5ac8fa;
+  opacity: 1;
 }
 
 /* ===================== Pill widget ===================== */
@@ -141,10 +151,19 @@ body {
   gap: 16px;
   cursor: grab;
 }
-.widget-pill .widget-clickable {
-  flex-direction: row;
-  align-items: center;
-  gap: 16px;
+.widget-pill .pill-open-btn {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: none;
+  border: none;
+  color: #fff;
+  cursor: pointer;
+  font-family: inherit;
+  padding: 0;
+}
+.widget-pill .pill-open-btn:hover .pill-val {
+  color: #5ac8fa;
 }
 .widget-pill .pill-seg {
   display: flex;

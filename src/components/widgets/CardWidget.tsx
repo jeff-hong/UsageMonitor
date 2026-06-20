@@ -33,36 +33,36 @@ export function CardWidget({
 
   return (
     <div className="glass-card widget-card" data-tauri-drag-region>
-      <div className="widget-clickable" onClick={onOpenDetail}>
-        <div className="label-tiny">今日</div>
-        <div className="big-num">
-          {loading ? "…" : fmtTokens(tokens)}
-          <small className="big-unit">tokens</small>
-        </div>
-        <div className="token-total">
-          花费 <span className="cost-small">{priced ? fmtUsd(cost) : `${fmtUsd(cost)}*`}</span>
-        </div>
-
-        <div className="tool-rows">
-          {(summary?.tools ?? []).map((t) => {
-            const tt = t.input_tok + t.output_tok + t.cache_tok;
-            if (tt === 0) return null;
-            return (
-              <div className="tool-row" key={t.tool}>
-                <span className="tool-name">
-                  <span
-                    className="dot"
-                    style={{ background: TOOL_COLOR[t.tool] ?? "#888" }}
-                  />
-                  {TOOL_LABEL[t.tool] ?? t.tool}
-                </span>
-                <span className="tool-tok">{fmtTokens(tt)}</span>
-              </div>
-            );
-          })}
-        </div>
-        <div className="hint">点击查看详情</div>
+      <div className="label-tiny" data-tauri-drag-region>今日</div>
+      <div className="big-num" data-tauri-drag-region>
+        {loading ? "…" : fmtTokens(tokens)}
+        <small className="big-unit">tokens</small>
       </div>
+      <div className="token-total" data-tauri-drag-region>
+        花费 <span className="cost-small">{priced ? fmtUsd(cost) : `${fmtUsd(cost)}*`}</span>
+      </div>
+
+      <div className="tool-rows" data-tauri-drag-region>
+        {(summary?.tools ?? []).map((t) => {
+          const tt = t.input_tok + t.output_tok + t.cache_tok;
+          if (tt === 0) return null;
+          return (
+            <div className="tool-row" key={t.tool}>
+              <span className="tool-name">
+                <span
+                  className="dot"
+                  style={{ background: TOOL_COLOR[t.tool] ?? "#888" }}
+                />
+                {TOOL_LABEL[t.tool] ?? t.tool}
+              </span>
+              <span className="tool-tok">{fmtTokens(tt)}</span>
+            </div>
+          );
+        })}
+      </div>
+      <button className="open-detail-btn" onClick={onOpenDetail}>
+        点击查看详情 →
+      </button>
     </div>
   );
 }
