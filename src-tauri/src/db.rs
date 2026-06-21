@@ -440,6 +440,112 @@ mod tests {
     /// shows Claude.
     /// Run: cargo test --lib db::tests::check_today_ours -- --ignored --nocapture
 
+    /// Compare TODAY's tokens: cc-switch vs ours, broken down by app_type, to
+    /// find the exact source of the discrepancy. Kept as a verification tool.
+    /// Run: cargo test --lib db::tests::compare_today -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn compare_today() {
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        use chrono::Timelike;
+        let today_local = chrono::Local::now();
+        let today_ts_start = today_local
+            .with_hour(0).and_then(|d| d.with_minute(0)).and_then(|d| d.with_second(0))
+            .and_then(|d| d.with_nanosecond(0))
+            .map(|d| d.timestamp())
+            .unwrap_or(0);
+        let today_ts_end = today_ts_start + 86400;
+        println!("today: {today} (window {today_ts_start}..{today_ts_end})");
+
+        // ---- cc-switch today ----
+        let ccpath = dirs::home_dir().map(|h| h.join(".cc-switch").join("cc-switch.db")).unwrap();
+        let ccconn = Connection::open(&ccpath).unwrap();
+        // Check the created_at range to understand its unit/scale.
+        let (mn, mx, cnt): (i64, i64, i64) = ccconn
+            .query_row("SELECT MIN(created_at), MAX(created_at), COUNT(*) FROM proxy_request_logs", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        println!("cc-switch created_at range: min={mn} max={mx} count={cnt}");
+        println!("  (today_local_start={today_ts_start}, today_local_end={today_ts_end})");
+
+        println!("\n=== cc-switch today by app_type (seconds epoch) ===");
+        let mut s = ccconn
+            .prepare(
+                "SELECT app_type, COUNT(*),
+                        COALESCE(SUM(input_tokens),0),
+                        COALESCE(SUM(output_tokens),0),
+                        COALESCE(SUM(cache_read_tokens),0),
+                        COALESCE(SUM(cache_creation_tokens),0)
+                 FROM proxy_request_logs
+                 WHERE created_at >= ?1 AND created_at < ?2
+                 GROUP BY app_type",
+            )
+            .unwrap();
+        let ccrows: Vec<(String, i64, i64, i64, i64, i64)> = s
+            .query_map(rusqlite::params![today_ts_start, today_ts_end], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+            })
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        let mut cc_total = 0i64;
+        for (app, n, inp, out, cr, cc) in &ccrows {
+            let t = inp + out + cr + cc;
+            cc_total += t;
+            println!("  {app}: {n} reqs, input={inp} output={out} cache_read={cr} cache_create={cc} TOTAL={t}");
+        }
+        println!("  cc-switch today total tokens: {cc_total}");
+
+        // ---- ours today ----
+        let db = Db::open().unwrap();
+        let conn = db.lock();
+        println!("\n=== ours today by tool ===");
+        let mut s = conn
+            .prepare(
+                "SELECT tool, COUNT(*),
+                        COALESCE(SUM(input_tok),0),
+                        COALESCE(SUM(output_tok),0),
+                        COALESCE(SUM(cache_tok),0)
+                 FROM usage_records WHERE date = ?1 GROUP BY tool",
+            )
+            .unwrap();
+        let rows: Vec<(String, i64, i64, i64, i64)> = s
+            .query_map(rusqlite::params![today], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        let mut our_total = 0i64;
+        for (tool, n, inp, out, cache) in &rows {
+            let t = inp + out + cache;
+            our_total += t;
+            println!("  {tool}: {n} records, input={inp} output={out} cache={cache} TOTAL={t}");
+        }
+        println!("  ours today total tokens: {our_total}");
+        println!("\n=== DIFF: cc_switch - ours = {} ===", cc_total - our_total);
+
+        // Dump our today codex records in detail to see if total_tokens caused
+        // double counting.
+        println!("\n=== our today codex records ===");
+        let mut s = conn
+            .prepare("SELECT session_id, model, input_tok, output_tok, cache_tok, timestamp
+                      FROM usage_records WHERE date = ?1 AND tool='codex' ORDER BY timestamp")
+            .unwrap();
+        let rows: Vec<(String, String, i64, i64, i64, i64)> = s
+            .query_map(rusqlite::params![today], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+            })
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        for (sid, model, inp, out, cache, ts) in &rows {
+            let short_sid: String = sid.chars().take(12).collect();
+            println!("  ts={ts} model={model} in={inp} out={out} cache={cache} sess={short_sid}");
+        }
+    }
+
     /// Dump cc-switch's proxy_request_logs schema + samples so we can map its
     /// columns onto ours when reading it as a data source.
     ///
@@ -494,7 +600,7 @@ mod tests {
         }
 
         // What distinct values appear in the key categorical columns?
-        for col in ["app_type", "data_source", "provider_id", "status"] {
+        for col in ["app_type", "data_source", "provider_id", "status_code"] {
             println!("\n=== distinct {col} ===");
             let mut s = conn
                 .prepare(&format!("SELECT {col}, COUNT(*) FROM proxy_request_logs GROUP BY {col} ORDER BY 2 DESC"))
