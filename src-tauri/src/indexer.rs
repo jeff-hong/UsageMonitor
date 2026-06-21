@@ -35,24 +35,39 @@ pub struct IndexProgress {
 /// events to `app` as it goes.
 pub fn initial_full_index(db: Db, app: AppHandle) {
     if is_indexed(&db) {
-        // One-time data fix: older parser versions recorded Claude's model as
-        // "<synthetic>" for nearly every record, so prices never matched. If we
-        // spot that, wipe and rebuild with the current parser before continuing.
-        let needs_fix = {
+        // One-time data fixes for older parser versions. Rebuild the whole
+        // index if either condition holds:
+        //  - Claude rows still carry the "<synthetic>" placeholder model
+        //  - Codex rows predate the cache-read de-duplication (v2)
+        let (synthetic, dedup_marker): (i64, i64) = {
             let conn = db.lock();
-            conn.query_row(
-                "SELECT COUNT(*) FROM usage_records WHERE model='<synthetic>' AND tool='claude'",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap_or(0)
+            let s = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM usage_records WHERE model='<synthetic>' AND tool='claude'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap_or(0);
+            let m = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM settings WHERE key='codex_dedup_v2'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap_or(0);
+            (s, m)
         };
-        if needs_fix > 0 {
-            tracing::info!("rebuilding index to fix {needs_fix} <synthetic> claude rows");
+        if synthetic > 0 || dedup_marker == 0 {
+            tracing::info!("rebuilding index (synthetic={synthetic}, dedup_v2={dedup_marker})");
             {
                 let conn = db.lock();
                 let _ = conn.execute("DELETE FROM usage_records", []);
                 let _ = conn.execute("DELETE FROM file_state", []);
+                let _ = conn.execute(
+                    "INSERT INTO settings(key,value) VALUES('codex_dedup_v2','1')
+                     ON CONFLICT(key) DO UPDATE SET value='1'",
+                    [],
+                );
             }
         } else {
             let _ = app.emit("index-progress", IndexProgress { indexed: 0, total: 0, done: true });

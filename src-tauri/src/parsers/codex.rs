@@ -132,6 +132,14 @@ impl UsageParser for CodexParser {
             let mut input = get_u64(usage, "input_tokens");
             let cached = get_u64(usage, "cached_input_tokens");
             let output = get_u64(usage, "output_tokens") + get_u64(usage, "reasoning_output_tokens");
+            // cc-switch parity: Codex's input_tokens already INCLUDES the cached
+            // (cache-hit) tokens, so naively summing input + cache double-counts.
+            // Store the de-duped new input (input - cached) and keep cached
+            // separately for display ("cache hit"). This makes our totals match
+            // cc-switch's "real consumed" figure exactly.
+            if cached > 0 && input >= cached {
+                input -= cached;
+            }
             // Codex often leaves the per-field counters at 0 while reporting
             // the real volume only in `total_tokens`. When that happens, fold
             // the total into input so the session isn't dropped as empty.
@@ -216,7 +224,7 @@ mod tests {
         assert_eq!(r.project.as_deref(), Some("E:\\Dev\\proj"));
         assert_eq!(r.model, "gpt-5");
         assert_eq!(r.session_id, "sid-1");
-        assert_eq!(r.input_tok, 100);
+        assert_eq!(r.input_tok, 70); // 100 - 30 cached (de-duped, cc-switch parity)
         assert_eq!(r.cache_tok, 30);
         assert_eq!(r.output_tok, 60); // output 50 + reasoning 10
         std::fs::remove_dir_all(&tmp).ok();

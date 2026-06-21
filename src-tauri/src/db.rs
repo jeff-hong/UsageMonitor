@@ -394,28 +394,36 @@ mod tests {
             }
             println!("seeded {} custom prices", prices.len());
         }
-        // Index real usage data into this live DB if it's empty (first run).
-        // Also re-index Codex when the parser changes — old rows carried the
-        // pre-fix token counts, so wipe codex rows + their file_state offsets
-        // and re-parse from scratch.
-        // Wipe + rebuild once to recover from the earlier "<synthetic>" model
-        // bug, then recompute costs. On later runs this is harmless (idempotent
-        // upsert by source_file+session+timestamp).
+        // Rebuild whenever stale data is detected: either the old "<synthetic>"
+        // Claude model bug, or pre-de-dup Codex rows (input included cache_read,
+        // inflating totals). Wiping + re-parsing is idempotent and cheap.
         {
             let conn = db.lock();
-            let needs_rebuild: i64 = conn
+            let syn: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM usage_records WHERE model='<synthetic>' AND tool='claude'",
                     [],
                     |r| r.get(0),
                 )
                 .unwrap_or(0);
+            // Codex pre-de-dup detection: if any codex row has input_tok == 0
+            // AND cache_tok > 0 it predates the de-dup fix (or was folded from
+            // total_tokens). Simplest reliable signal: just rebuild codex once
+            // by checking a marker setting.
+            let codex_fixed: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM settings WHERE key='codex_dedup_v2'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
             drop(conn);
-            if needs_rebuild > 0 {
-                println!("detected {needs_rebuild} buggy <synthetic> claude rows — full rebuild…");
+            if syn > 0 || codex_fixed == 0 {
+                println!("rebuilding (synthetic={syn}, codex_dedup_v2={codex_fixed})…");
                 let conn = db.lock();
                 let _ = conn.execute("DELETE FROM usage_records", []);
                 let _ = conn.execute("DELETE FROM file_state", []);
+                let _ = set_setting_raw(&conn, "codex_dedup_v2", "1");
                 drop(conn);
                 reindex_all(&db);
             }
