@@ -1,23 +1,14 @@
-// App: the widget window root. Holds the current widget shape and whether the
-// detail panel is open. Window is user-resizable: decorations are off so we
-// render our own thin resize edges that call startResize(direction).
+// App: the widget window root. Holds whether the detail panel is open. Window
+// is user-resizable: decorations are off so we render our own thin resize edges
+// that call startResize(direction).
 
 import { useEffect, useState } from "react";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import "./App.css";
 import { CardWidget } from "./components/widgets/CardWidget";
-import { PillWidget } from "./components/widgets/PillWidget";
 import { DetailPanel } from "./components/DetailPanel";
 import { SettingsPage } from "./components/SettingsPage";
 import { useTodaySummary } from "./hooks/useTodaySummary";
-
-type WidgetShape = "card" | "pill";
-
-function loadShape(): WidgetShape {
-  const s = localStorage.getItem("widget_shape");
-  // Only card/pill remain; gauge was removed — fall back to card.
-  return s === "pill" || s === "card" ? s : "card";
-}
 
 // Thin edges + corners that drive native window resizing on a frameless
 // window. Each calls startResizeDragging with the directions it represents.
@@ -41,7 +32,6 @@ function ResizeHandles() {
 }
 
 function App() {
-  const [shape, setShape] = useState<WidgetShape>(loadShape);
   const [detailOpen, setDetailOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const { summary, loading } = useTodaySummary();
@@ -63,7 +53,6 @@ function App() {
               getCurrentWindow().setSize(new LogicalSize(240, 300)).catch(() => {});
             }
           }}
-          onShapeChange={(s) => setShape(s)}
         />
         <ResizeHandles />
       </>
@@ -91,32 +80,9 @@ function App() {
       .catch(() => {});
   };
 
-  const cycleShape = () => {
-    const next: WidgetShape = shape === "card" ? "pill" : "card";
-    setShape(next);
-    localStorage.setItem("widget_shape", next);
-    // Nudge to a sensible default size for the new shape, but the user can
-    // then drag it to anything they like.
-    const sizes = {
-      card: { width: 240, height: 300 },
-      pill: { width: 340, height: 90 },
-    };
-    getCurrentWindow()
-      .setSize(new LogicalSize(sizes[next].width, sizes[next].height))
-      .catch(() => {});
-  };
-
   return (
     <div className="widget-root">
-      {shape === "card" && (
-        <CardWidget summary={summary} loading={loading} onOpenDetail={open} />
-      )}
-      {shape === "pill" && (
-        <PillWidget summary={summary} loading={loading} onOpenDetail={open} />
-      )}
-      <div className="shape-cycle" onClick={cycleShape} title="切换悬浮窗样式">
-        ⇄
-      </div>
+      <CardWidget summary={summary} loading={loading} onOpenDetail={open} />
       <ResizeHandles />
     </div>
   );

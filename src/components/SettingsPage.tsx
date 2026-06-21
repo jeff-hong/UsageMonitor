@@ -6,10 +6,8 @@
 import { useEffect, useState } from "react";
 import { api, fmtTokens, type Pricing, type UnpricedModel } from "../lib/api";
 
-type WidgetShape = "card" | "pill";
 type TaskbarMode = "tray" | "live_number" | "off";
 
-const WIDGET_LABEL: Record<WidgetShape, string> = { card: "卡片", pill: "胶囊" };
 const TASKBAR_LABEL: Record<TaskbarMode, string> = {
   tray: "托盘图标",
   live_number: "实时数字",
@@ -18,15 +16,12 @@ const TASKBAR_LABEL: Record<TaskbarMode, string> = {
 
 export function SettingsPage({
   onBack,
-  onShapeChange,
 }: {
   onBack: () => void;
-  onShapeChange: (s: WidgetShape) => void;
 }) {
   const [pricing, setPricing] = useState<Pricing[]>([]);
   const [unpriced, setUnpriced] = useState<UnpricedModel[]>([]);
   const [interval, setIntervalSec] = useState(30);
-  const [shape, setShape] = useState<WidgetShape>("card");
   const [taskbar, setTaskbar] = useState<TaskbarMode>("tray");
   const [newModel, setNewModel] = useState("");
   const [draftPrice, setDraftPrice] = useState<{ in: string; out: string; cache: string }>({
@@ -41,7 +36,6 @@ export function SettingsPage({
     api.listPricing().then(setPricing);
     api.getUnpricedModels().then(setUnpriced);
     api.getSetting("scan_interval_sec").then((v) => v && setIntervalSec(parseInt(v)));
-    api.getSetting("widget_shape").then((v) => (v as WidgetShape) && setShape(v as WidgetShape));
     api.getSetting("taskbar_mode").then((v) => (v as TaskbarMode) && setTaskbar(v as TaskbarMode));
   };
 
@@ -84,12 +78,6 @@ export function SettingsPage({
     flash(`扫描间隔已设为 ${v} 秒`);
   };
 
-  const pickShape = async (s: WidgetShape) => {
-    setShape(s);
-    await api.setSetting("widget_shape", s);
-    onShapeChange(s);
-  };
-
   const pickTaskbar = async (m: TaskbarMode) => {
     setTaskbar(m);
     await api.setSetting("taskbar_mode", m);
@@ -105,20 +93,6 @@ export function SettingsPage({
       {msg && <div className="flash">{msg}</div>}
 
       {/* display modes */}
-      <Section title="悬浮窗样式">
-        <div className="seg-tabs">
-          {(["card", "pill"] as const).map((s) => (
-            <div
-              key={s}
-              className={`tab ${shape === s ? "active" : ""}`}
-              onClick={() => pickShape(s as WidgetShape)}
-            >
-              {WIDGET_LABEL[s]}
-            </div>
-          ))}
-        </div>
-      </Section>
-
       <Section title="任务栏">
         <div className="seg-tabs">
           {(["tray", "live_number", "off"] as TaskbarMode[]).map((m) => (
