@@ -365,6 +365,50 @@ pub fn get_project_sessions(state: tauri::State<'_, Db>, project: String) -> Vec
     .unwrap_or_default()
 }
 
+/// Today's usage broken down per model — mirrors cc-switch's per-model list.
+/// Each row: model, tool, new-input/output/cache tokens, cost, priced flag.
+#[derive(serde::Serialize)]
+pub struct ModelBreakdown {
+    pub model: String,
+    pub tool: String,
+    pub input_tok: u64,
+    pub output_tok: u64,
+    pub cache_tok: u64,
+    pub cost_usd: f64,
+    pub priced: bool,
+}
+
+#[tauri::command]
+pub fn get_today_by_model(state: tauri::State<'_, Db>) -> Vec<ModelBreakdown> {
+    let conn = state.lock();
+    let today = today_str();
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT model, tool,
+                COALESCE(SUM(input_tok),0),
+                COALESCE(SUM(output_tok),0),
+                COALESCE(SUM(cache_tok),0),
+                COALESCE(SUM(cost_usd),0),
+                CASE WHEN MIN(priced)=1 THEN 1 ELSE 0 END
+         FROM usage_records WHERE date = ?1
+         GROUP BY model, tool ORDER BY COALESCE(SUM(cost_usd),0) DESC",
+    ) else {
+        return vec![];
+    };
+    stmt.query_map(rusqlite::params![today], |r| {
+        Ok(ModelBreakdown {
+            model: r.get(0)?,
+            tool: r.get(1)?,
+            input_tok: r.get::<_, i64>(2)? as u64,
+            output_tok: r.get::<_, i64>(3)? as u64,
+            cache_tok: r.get::<_, i64>(4)? as u64,
+            cost_usd: r.get(5)?,
+            priced: r.get::<_, i64>(6)? == 1,
+        })
+    })
+    .map(|rows| rows.filter_map(Result::ok).collect())
+    .unwrap_or_default()
+}
+
 /// Read a settings value (scan interval, widget/taskbar mode). Empty if unset.
 #[tauri::command]
 pub fn get_setting(state: tauri::State<'_, Db>, key: String) -> Option<String> {

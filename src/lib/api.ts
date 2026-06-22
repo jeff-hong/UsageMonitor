@@ -76,6 +76,16 @@ export interface UnpricedModel {
   tokens: number;
 }
 
+export interface ModelBreakdown {
+  model: string;
+  tool: string;
+  input_tok: number;
+  output_tok: number;
+  cache_tok: number;
+  cost_usd: number;
+  priced: boolean;
+}
+
 // --- commands ---
 
 export const api = {
@@ -86,6 +96,7 @@ export const api = {
   getProjects: () => invoke<ProjectRow[]>("get_projects"),
   getProjectSessions: (project: string) =>
     invoke<SessionRow[]>("get_project_sessions", { project }),
+  getTodayByModel: () => invoke<ModelBreakdown[]>("get_today_by_model"),
   recomputeCost: () => invoke<void>("recompute_cost"),
   listPricing: () => invoke<Pricing[]>("list_pricing"),
   setPricing: (

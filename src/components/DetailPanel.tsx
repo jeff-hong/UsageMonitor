@@ -8,6 +8,7 @@ import {
   fmtUsd,
   fmtTokens,
   type DayPoint,
+  type ModelBreakdown,
   type Range,
   type Summary,
 } from "../lib/api";
@@ -18,11 +19,6 @@ const TOOL_COLOR: Record<string, string> = {
   claude: "#ff8c42",
   codex: "#34c759",
 };
-const TOOL_LABEL: Record<string, string> = {
-  claude: "Claude Code",
-  codex: "Codex",
-};
-const TOOL_ICON: Record<string, string> = { claude: "✦", codex: "◈" };
 
 type View = "overview" | "history" | "projects";
 
@@ -31,14 +27,16 @@ export function DetailPanel({ onClose }: { onClose: () => void }) {
   const [range, setRange] = useState<Range>("today");
   const [summary, setSummary] = useState<Summary | null>(null);
   const [history, setHistory] = useState<DayPoint[]>([]);
+  const [byModel, setByModel] = useState<ModelBreakdown[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     setLoading(true);
-    Promise.all([api.getRangeSummary(range), api.getHistory("week")])
-      .then(([s, h]) => {
+    Promise.all([api.getRangeSummary(range), api.getHistory("week"), api.getTodayByModel()])
+      .then(([s, h, m]) => {
         setSummary(s);
         setHistory(h);
+        setByModel(m);
         setLoading(false);
       })
       .catch(() => setLoading(false));
@@ -121,50 +119,32 @@ export function DetailPanel({ onClose }: { onClose: () => void }) {
         ))}
       </div>
 
-      {/* per-tool breakdown */}
+      {/* per-model breakdown (mirrors cc-switch's itemized list) */}
       <div className="tool-section">
-        {(summary?.tools ?? []).map((t) => {
-          const tt = t.input_tok + t.output_tok + t.cache_tok;
+        <div className="section-title">按模型明细</div>
+        {byModel.map((m) => {
+          const tt = m.input_tok + m.output_tok + m.cache_tok;
           if (tt === 0) return null;
-          const pct = totalTokens > 0 ? Math.round((tt / totalTokens) * 100) : 0;
           return (
-            <div className="tool-detail" key={t.tool}>
-              <div className="tool-head">
+            <div className="model-detail" key={m.model + m.tool}>
+              <div className="model-head">
                 <span
-                  className="tool-icon"
-                  style={{
-                    background: `${TOOL_COLOR[t.tool]}33`,
-                    color: TOOL_COLOR[t.tool],
-                  }}
-                >
-                  {TOOL_ICON[t.tool]}
-                </span>
-                <div className="tool-meta">
-                  <div className="tool-title">
-                    {TOOL_LABEL[t.tool] ?? t.tool}
-                  </div>
-                  <div className="tool-stats">
-                    {fmtTokens(tt)} tokens · {t.session_count} 会话
-                    {!t.fully_priced && (
-                      <span className="unpriced-tag">部分未定价</span>
-                    )}
-                  </div>
-                </div>
-                <div className="tool-amt">
-                  <div className="amt-cost">{fmtUsd(t.cost_usd)}</div>
-                  <div className="amt-pct">{pct}%</div>
-                </div>
-              </div>
-              <div className="tool-bar">
-                <div
-                  className="tool-fill"
-                  style={{ width: `${pct}%`, background: TOOL_COLOR[t.tool] }}
+                  className="model-dot"
+                  style={{ background: TOOL_COLOR[m.tool] ?? "#888" }}
                 />
+                <span className="model-name">{m.model}</span>
+                {!m.priced && <span className="unpriced-tag">未定价</span>}
+                <span className="model-cost">{fmtUsd(m.cost_usd)}</span>
+              </div>
+              <div className="model-stats">
+                <span>新增输入 {fmtTokens(m.input_tok)}</span>
+                <span>输出 {fmtTokens(m.output_tok)}</span>
+                <span>命中缓存 {fmtTokens(m.cache_tok)}</span>
               </div>
             </div>
           );
         })}
-        {summary && summary.tools.every((t) => t.input_tok + t.output_tok + t.cache_tok === 0) && (
+        {byModel.length === 0 && (
           <div className="empty-state">该时段暂无使用记录</div>
         )}
       </div>

@@ -365,27 +365,29 @@ mod tests {
             // So we price those two directly. The fancy names found earlier
             // (glm-5.x etc.) belonged to THIS conversation's own logs, not the
             // user's daily Claude/Codex history. Kept below for completeness.
+            // Prices mirrored from cc-switch's stored cost columns (reverse-
+            // engineered from total_cost / tokens). All in USD per 1M tokens.
             let prices: &[(&str, f64, f64, f64)] = &[
-                // Anthropic Claude (official rates, USD per 1M tokens)
-                // opus-4.8 / fable-5 are the top tier; opus-4.7 the cheaper one.
-                ("claude-opus-4-8", 10.0, 50.0, 1.0),
-                ("claude-opus-4.8", 10.0, 50.0, 1.0),
-                ("claude-fable-5", 10.0, 50.0, 1.0),
+                // OpenAI / Codex
+                ("gpt-5.5", 5.0, 30.0, 0.5),
+                ("openai", 5.0, 30.0, 0.5), // codex placeholder
+                // Anthropic Claude
+                ("claude-opus-4-8", 5.0, 25.0, 0.5),
+                ("claude-opus-4.8", 5.0, 25.0, 0.5),
                 ("claude-opus-4-7", 5.0, 25.0, 0.5),
+                ("claude-fable-5", 10.0, 50.0, 1.0),
                 ("claude-sonnet-4-6", 3.0, 15.0, 0.3),
                 ("claude-haiku-4-5-20251001", 1.0, 5.0, 0.1),
                 ("<synthetic>", 3.0, 15.0, 0.3), // fallback placeholder
-                // OpenAI / Codex
-                ("gpt-5.5", 1.25, 10.0, 0.125),
-                ("openai", 1.25, 10.0, 0.125), // codex placeholder
-                // Zhipu GLM (public rates, CNY ~7/USD)
-                ("glm-5.2", 1.14, 4.0, 0.29),
-                ("glm-5.1", 0.517, 4.40, 0.10),
+                // Zhipu GLM
+                ("glm-5.2", 0.5, 0.5, 0.08),
+                ("glm-5.1", 0.5, 3.48, 0.077),
                 ("glm-4.5-air", 0.11, 0.29, 0.05),
-                // DeepSeek (V3 / V3.2 rates)
-                ("deepseek-v4-pro", 0.14, 0.42, 0.028),
-                ("deepseek-v3-2", 0.14, 0.42, 0.028),
-                // ByteDance Doubao (volcengine, 1.2/16 CNY)
+                // DeepSeek
+                ("deepseek-v4-pro", 0.14, 2.94, 0.091),
+                ("deepseek-v4-flash", 0.14, 0.28, 0.0028),
+                ("deepseek-v3-2", 0.14, 2.94, 0.091),
+                // ByteDance Doubao
                 ("doubao-seed-code", 0.17, 2.29, 0.10),
                 ("doubao-seed-2.0-code", 0.17, 2.29, 0.10),
             ];
@@ -448,6 +450,41 @@ mod tests {
     /// shows Claude.
     /// Run: cargo test --lib db::tests::check_today_ours -- --ignored --nocapture
 
+    /// Reverse-engineer cc-switch's per-model unit prices from its stored
+    /// cost columns, so we can mirror them exactly. Prints model -> (in, out,
+    /// cache) per 1M tokens.
+    /// Run: cargo test --lib db::tests::ccswitch_pricing -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn ccswitch_pricing() {
+        let path = dirs::home_dir().map(|h| h.join(".cc-switch").join("cc-switch.db")).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        // For each model, sum tokens and costs, then derive unit price =
+        // total_cost / total_tokens * 1e6. De-dup codex input (subtract cache_read
+        // first) so the input price reflects the real new-input rate.
+        let mut s = conn.prepare(
+            "SELECT model,
+                    SUM(CAST(input_tokens AS REAL) - CAST(cache_read_tokens AS REAL)),
+                    SUM(CAST(output_tokens AS REAL)),
+                    SUM(CAST(cache_read_tokens AS REAL)),
+                    SUM(CAST(input_cost_usd AS REAL)),
+                    SUM(CAST(output_cost_usd AS REAL)),
+                    SUM(CAST(cache_read_cost_usd AS REAL))
+             FROM proxy_request_logs
+             WHERE model IS NOT NULL
+             GROUP BY model ORDER BY SUM(CAST(total_cost_usd AS REAL)) DESC",
+        ).unwrap();
+        let rows: Vec<(String, f64, f64, f64, f64, f64, f64)> = s.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+        }).unwrap().filter_map(Result::ok).collect();
+        for (m, inp, out, cr, ic, oc, crc) in &rows {
+            let in_p = if *inp > 0.0 { ic / inp * 1e6 } else { 0.0 };
+            let out_p = if *out > 0.0 { oc / out * 1e6 } else { 0.0 };
+            let cache_p = if *cr > 0.0 { crc / cr * 1e6 } else { 0.0 };
+            println!("  (\"{m}\", {in_p:.4}, {out_p:.4}, {cache_p:.4}),  // inp={inp:.0} out={out:.0} cr={cr:.0}");
+        }
+    }
+
     /// Compare TODAY's tokens: cc-switch vs ours, broken down by app_type, to
     /// find the exact source of the discrepancy. Kept as a verification tool.
     /// Run: cargo test --lib db::tests::compare_today -- --ignored --nocapture
@@ -498,12 +535,20 @@ mod tests {
             .filter_map(Result::ok)
             .collect();
         let mut cc_total = 0i64;
+        let mut cc_cost = 0.0;
         for (app, n, inp, out, cr, cc) in &ccrows {
             let t = inp + out + cr + cc;
             cc_total += t;
             println!("  {app}: {n} reqs, input={inp} output={out} cache_read={cr} cache_create={cc} TOTAL={t}");
         }
-        println!("  cc-switch today total tokens: {cc_total}");
+        // cc-switch's stored cost (the authoritative figure).
+        cc_cost = ccconn.query_row(
+            "SELECT COALESCE(SUM(CAST(total_cost_usd AS REAL)),0) FROM proxy_request_logs
+             WHERE created_at >= ?1 AND created_at < ?2",
+            rusqlite::params![today_ts_start, today_ts_end],
+            |r| r.get::<_, f64>(0),
+        ).unwrap_or(0.0);
+        println!("  cc-switch today total tokens: {cc_total}, cost: ${cc_cost:.4}");
 
         // ---- ours today ----
         let db = Db::open().unwrap();
@@ -531,8 +576,14 @@ mod tests {
             our_total += t;
             println!("  {tool}: {n} records, input={inp} output={out} cache={cache} TOTAL={t}");
         }
-        println!("  ours today total tokens: {our_total}");
-        println!("\n=== DIFF: cc_switch - ours = {} ===", cc_total - our_total);
+        let our_cost: f64 = conn.query_row(
+            "SELECT COALESCE(SUM(cost_usd),0) FROM usage_records WHERE date=?1",
+            rusqlite::params![today],
+            |r| r.get(0),
+        ).unwrap_or(0.0);
+        println!("  ours today total tokens: {our_total}, cost: ${our_cost:.4}");
+        println!("\n=== DIFF tokens: cc-ours={}, cost: ${:.4} - ${:.4} = ${:.4} ===",
+            cc_total - our_total, cc_cost, our_cost, cc_cost - our_cost);
 
         // Dump our today codex records in detail to see if total_tokens caused
         // double counting.
