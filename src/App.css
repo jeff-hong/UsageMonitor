@@ -506,90 +506,66 @@ select {
 }
 
 .hover-tool {
-  padding: 6px 8px;
+  padding: 5px 8px;
   border: none;
-  border-radius: 10px;
+  border-radius: 8px;
   background: rgba(255, 255, 255, 0.7);
-  box-shadow:
-    inset 0 0 0 1px rgba(38, 47, 62, 0.05),
-    0 5px 12px rgba(22, 30, 44, 0.05);
+  box-shadow: inset 0 0 0 1px rgba(38, 47, 62, 0.05);
 }
 
-.hover-tool-top {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
+/* Row 1: dot + name + tokens + cost, all on one line */
+.hover-tool-row1 {
+  display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   min-width: 0;
 }
 
 .hover-dot {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 999px;
+  flex: 0 0 auto;
 }
 
 .hover-tool-name {
-  overflow: hidden;
   color: #202434;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 820;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .hover-tool-tokens {
+  margin-left: auto;
   color: #171b27;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 850;
   font-variant-numeric: tabular-nums;
 }
 
-.hover-tool-amounts {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 0;
-}
-
 .hover-tool-cost {
   color: #ef7b00;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 800;
   font-variant-numeric: tabular-nums;
-}
-
-.hover-tool-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 5px;
-  margin-top: 7px;
-}
-
-.hover-pill {
-  min-width: 0;
-  padding: 5px 7px;
-  border-radius: 7px;
-  background: rgba(243, 245, 248, 0.78);
-}
-.hover-pill.highlight {
-  background: rgba(52, 199, 89, 0.11);
-}
-.hover-pill span {
-  display: block;
-  color: #7b8494;
-  font-size: 12px;
-  line-height: 1;
-}
-.hover-pill strong {
-  display: block;
-  margin-top: 3px;
-  margin-left: 0;
-  color: #242938;
-  font-size: 11px;
-  line-height: 1;
-  font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+/* Row 2: inline metrics (input / output / cache / hit-rate) */
+.hover-tool-row2 {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 8px;
+  margin-top: 3px;
+  padding-left: 13px;
+  color: #8a91a0;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.hover-tool-row2 .hover-hit {
+  color: #119653;
+  font-weight: 700;
 }
 
 .hover-empty {

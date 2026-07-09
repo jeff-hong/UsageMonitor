@@ -34,7 +34,7 @@ export function ProjectsPage({ onBack }: { onBack: () => void }) {
   return (
     <div className="glass-card sub-page">
       <div className="page-head" onMouseDown={nativeDragMouseDown("detail")}>
-        <span className="back" onClick={onBack}>‹</span>
+        <span className="back" data-no-drag role="button" onClick={onBack}>‹</span>
         <span className="page-title">按项目</span>
       </div>
       <div className="proj-total">

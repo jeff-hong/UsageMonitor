@@ -17,8 +17,11 @@ import { useTodaySummary } from "./hooks/useTodaySummary";
 
 const WIDGET_SIZE = { width: 150, height: 42 };
 const DETAIL_SIZE = { width: 360, height: 560 };
-const HOVER_DETAIL_SIZE = { width: 360, height: 420 };
-const HOVER_DETAIL_MIN_HEIGHT = 180;
+// Hover detail uses a FIXED height (no dynamic measurement). The content is
+// compact: head + provider strip + up to 2 tool rows. If it ever exceeds this,
+// the tool-list scrolls internally. Fixed height = no measurement race that
+// previously clipped the Codex row.
+const HOVER_DETAIL_SIZE = { width: 360, height: 300 };
 const HOVER_OPEN_DELAY_MS = 200;
 const HOVER_CLOSE_DELAY_MS = 0;
 let cachedWindows: Partial<Record<string, TauriWindow>> = {};
@@ -68,12 +71,8 @@ function WidgetApp() {
   const pointerInsideWidgetRef = useRef(false);
   const suppressHoverUntilRef = useRef(0);
   const hoverPrepareRequestRef = useRef(0);
-  // Start at the max height so the FIRST show doesn't crop the tool list. The
-  // hover window's useLayoutEffect measures the real content height and emits
-  // `hover-detail-height`, which shrinks the window to fit. If this started at
-  // HOVER_DETAIL_MIN_HEIGHT (180) the first placeAndShow would clamp the window
-  // to 180px and the "按工具" rows would be clipped off-screen until the
-  // measurement raced in — visibly cutting them off.
+  // Fixed hover height — no longer dynamic. Kept as a ref for API symmetry but
+  // it always equals HOVER_DETAIL_SIZE.height.
   const hoverHeightRef = useRef(HOVER_DETAIL_SIZE.height);
   const menuRef = useRef<Menu | null>(null);
 
@@ -126,16 +125,8 @@ function WidgetApp() {
       showDetailWindow("overview");
     }).then((fn) => unlisteners.push(fn));
 
-    listen<number>("hover-detail-height", async (event) => {
-      if (!wantsHoverRef.current || isDraggingRef.current) return;
-      const height = normalizeHoverHeight(event.payload);
-      hoverHeightRef.current = height;
-      // Single IPC re-places the hover window at its new height (no show —
-      // it's already visible while content grows/shrinks). This replaces the
-      // old placeWindowNearWidget (5 IPCs) + setSize (1 IPC) double-call that
-      // caused a visible jump between the two SetWindowPos calls.
-      await placeAndShow("hover_detail", { width: HOVER_DETAIL_SIZE.width, height }, { side: "left", vertical: "top" }).catch(() => {});
-    }).then((fn) => unlisteners.push(fn));
+    // NOTE: no hover-detail-height listener — the window now uses a FIXED
+    // height (HOVER_DETAIL_SIZE), so there's nothing to resize on data refresh.
 
     return () => {
       unlisteners.forEach((unlisten) => unlisten());
@@ -381,20 +372,12 @@ function initWidgetWindow() {
   win.show().catch(() => {});
 }
 
-function normalizeHoverHeight(height: number): number {
-  return clamp(Math.round(height), HOVER_DETAIL_MIN_HEIGHT, HOVER_DETAIL_SIZE.height);
-}
-
 async function getWindow(label: string): Promise<TauriWindow | null> {
   if (cachedWindows[label]) return cachedWindows[label] ?? null;
   const { Window } = await import("@tauri-apps/api/window");
   const win = await Window.getByLabel(label);
   if (win) cachedWindows[label] = win;
   return win;
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(value, max));
 }
 
 function parseNativePoint(payload: unknown): { x: number; y: number } | undefined {

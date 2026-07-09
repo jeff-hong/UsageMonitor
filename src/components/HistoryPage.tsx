@@ -33,7 +33,7 @@ export function HistoryPage({ onBack }: { onBack: () => void }) {
   return (
     <div className="glass-card sub-page">
       <div className="page-head" onMouseDown={nativeDragMouseDown("detail")}>
-        <span className="back" onClick={onBack}>‹</span>
+        <span className="back" data-no-drag onClick={onBack}>‹</span>
         <span className="page-title">历史记录</span>
       </div>
 
