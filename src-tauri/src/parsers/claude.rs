@@ -67,7 +67,11 @@ impl UsageParser for ClaudeParser {
         };
         let total = bytes.len() as u64;
         // If the file shrank (truncated/rotated), restart from the top.
-        let start = if start_offset > total { 0 } else { start_offset };
+        let start = if start_offset > total {
+            0
+        } else {
+            start_offset
+        };
         let slice = &bytes[start as usize..];
         let text = String::from_utf8_lossy(slice);
 
@@ -97,8 +101,8 @@ impl UsageParser for ClaudeParser {
             };
             let input = get_u64(usage, "input_tokens");
             let output = get_u64(usage, "output_tokens");
-            let cache =
-                get_u64(usage, "cache_creation_input_tokens") + get_u64(usage, "cache_read_input_tokens");
+            let cache_create = get_u64(usage, "cache_creation_input_tokens");
+            let cache_read = get_u64(usage, "cache_read_input_tokens");
             let model = message
                 .get("model")
                 .and_then(|v| v.as_str())
@@ -111,10 +115,7 @@ impl UsageParser for ClaudeParser {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let project = obj
-                .get("cwd")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
+            let project = obj.get("cwd").and_then(|v| v.as_str()).map(str::to_string);
             records.push(UsageRecord {
                 date: epoch_to_local_date(timestamp),
                 tool: Tool::Claude,
@@ -123,7 +124,8 @@ impl UsageParser for ClaudeParser {
                 session_id,
                 input_tok: input,
                 output_tok: output,
-                cache_tok: cache,
+                cache_tok: cache_read,
+                cache_create_tok: cache_create,
                 timestamp,
                 source_file: path.to_path_buf(),
             });
@@ -191,7 +193,8 @@ mod tests {
         assert_eq!(r.model, "claude-sonnet-4");
         assert_eq!(r.input_tok, 24633);
         assert_eq!(r.output_tok, 411);
-        assert_eq!(r.cache_tok, 300); // 100 + 200
+        assert_eq!(r.cache_tok, 200);
+        assert_eq!(r.cache_create_tok, 100);
         assert_eq!(r.project.as_deref(), Some("E:\\Idea\\test"));
         assert_eq!(r.session_id, "s1");
         assert_eq!(r.date, "2026-05-21"); // local day (UTC+8 would be 05-21 still here)

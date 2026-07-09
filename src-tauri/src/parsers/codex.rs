@@ -1,11 +1,12 @@
 //! Parser for Codex's session rollouts.
 //!
-//! Source: `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`
+//! Source: `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` plus
+//! `~/.codex/archived_sessions/rollout-*.jsonl`
 //!
 //! Records of interest:
 //! - `session_meta` — gives us `cwd` (project) and the session id.
 //! - `token_count` events — `payload.info.last_token_usage` is the per-turn
-//!   delta (input/output/cached/reasoning). Using `last_token_usage` avoids
+//!   delta (input/output/cached). Using `last_token_usage` avoids
 //!   any cross-record differencing and stays correct across log rotation.
 //!
 //! Codex logs don't name a concrete model, only `model_provider`. We record
@@ -18,19 +19,24 @@ use crate::models::{Tool, UsageRecord};
 
 pub struct CodexParser {
     root: PathBuf,
+    archive_root: PathBuf,
 }
 
 impl CodexParser {
     pub fn new() -> Self {
-        let root = dirs::home_dir()
-            .map(|h| h.join(".codex").join("sessions"))
+        let (root, archive_root) = dirs::home_dir()
+            .map(|h| {
+                let codex = h.join(".codex");
+                (codex.join("sessions"), codex.join("archived_sessions"))
+            })
             .unwrap_or_default();
-        CodexParser { root }
+        CodexParser { root, archive_root }
     }
 
     #[cfg(test)]
     pub fn with_root(root: PathBuf) -> Self {
-        CodexParser { root }
+        let archive_root = root.join("archived_sessions");
+        CodexParser { root, archive_root }
     }
 }
 
@@ -48,11 +54,13 @@ impl UsageParser for CodexParser {
     }
 
     fn discover_files(&self) -> Vec<PathBuf> {
-        let Some(root) = self.source_root() else {
-            return vec![];
-        };
         let mut out = Vec::new();
-        walk_jsonl(&root, &mut out);
+        if let Some(root) = self.source_root() {
+            walk_jsonl(&root, &mut out);
+        }
+        if self.archive_root.exists() {
+            walk_jsonl(&self.archive_root, &mut out);
+        }
         out
     }
 
@@ -67,14 +75,20 @@ impl UsageParser for CodexParser {
             }
         };
         let total = bytes.len() as u64;
-        let start = if start_offset > total { 0 } else { start_offset };
+        let start = if start_offset > total {
+            0
+        } else {
+            start_offset
+        };
         let slice = &bytes[start as usize..];
         let text = String::from_utf8_lossy(slice);
 
         // session_meta gives us project (cwd) + model_provider for the whole
-        // file; token_count events don't repeat them.
+        // file; token_count events don't repeat them. Codex logs don't carry a
+        // concrete model name (only model_provider), so we default to gpt-5.5,
+        // matching what cc-switch reports for Codex sessions.
         let mut project: Option<String> = None;
-        let mut model = String::from("openai");
+        let mut model = String::from("gpt-5.5");
         let mut session_id = String::new();
 
         let mut records = Vec::new();
@@ -100,7 +114,9 @@ impl UsageParser for CodexParser {
                         .map(str::to_string)
                         .or(project);
                     if let Some(m) = payload.get("model").and_then(|v| v.as_str()) {
-                        model = m.to_string();
+                        if m != "openai" {
+                            model = m.to_string();
+                        }
                     }
                     if let Some(id) = payload.get("id").and_then(|v| v.as_str()) {
                         session_id = id.to_string();
@@ -131,15 +147,10 @@ impl UsageParser for CodexParser {
 
             let mut input = get_u64(usage, "input_tokens");
             let cached = get_u64(usage, "cached_input_tokens");
-            let output = get_u64(usage, "output_tokens") + get_u64(usage, "reasoning_output_tokens");
-            // cc-switch parity: Codex's input_tokens already INCLUDES the cached
-            // (cache-hit) tokens, so naively summing input + cache double-counts.
-            // Store the de-duped new input (input - cached) and keep cached
-            // separately for display ("cache hit"). This makes our totals match
-            // cc-switch's "real consumed" figure exactly.
-            if cached > 0 && input >= cached {
-                input -= cached;
-            }
+            let output = get_u64(usage, "output_tokens");
+            // cc-switch 口径：Codex 的 input_tokens 保留原始值（包含 cache hit）。
+            // 成本计算会用 input - cache_read 作为新增输入成本，展示总量则与
+            // cc-switch 一样把 input/cache_read 分栏相加。
             // Codex often leaves the per-field counters at 0 while reporting
             // the real volume only in `total_tokens`. When that happens, fold
             // the total into input so the session isn't dropped as empty.
@@ -162,6 +173,7 @@ impl UsageParser for CodexParser {
                 input_tok: input,
                 output_tok: output,
                 cache_tok: cached,
+                cache_create_tok: 0, // codex logs don't report cache writes
                 timestamp,
                 source_file: path.to_path_buf(),
             });
@@ -224,9 +236,24 @@ mod tests {
         assert_eq!(r.project.as_deref(), Some("E:\\Dev\\proj"));
         assert_eq!(r.model, "gpt-5");
         assert_eq!(r.session_id, "sid-1");
-        assert_eq!(r.input_tok, 70); // 100 - 30 cached (de-duped, cc-switch parity)
+        assert_eq!(r.input_tok, 100);
         assert_eq!(r.cache_tok, 30);
-        assert_eq!(r.output_tok, 60); // output 50 + reasoning 10
+        assert_eq!(r.output_tok, 50);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn keeps_gpt_55_when_codex_logs_provider_placeholder() {
+        let tmp = std::env::temp_dir().join(format!("codex-test-provider-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let meta = r#"{"timestamp":"2026-06-01T02:39:19.245Z","type":"session_meta","payload":{"id":"sid-1","cwd":"E:\\Dev\\proj","model":"openai"}}"#;
+        let tc = r#"{"timestamp":"2026-06-01T02:40:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":50,"total_tokens":150}}}}"#;
+        let file = write_jsonl(&tmp, "rollout-provider.jsonl", &[meta, tc]);
+
+        let parser = CodexParser::with_root(tmp.clone());
+        let res = parser.parse_file(&file, 0);
+        assert_eq!(res.records.len(), 1);
+        assert_eq!(res.records[0].model, "gpt-5.5");
         std::fs::remove_dir_all(&tmp).ok();
     }
 

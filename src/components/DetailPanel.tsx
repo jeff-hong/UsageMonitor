@@ -1,17 +1,21 @@
 // Detail panel: the main interactive surface. Opened from any widget by
-// double-click. Shows today's total, a per-tool breakdown with progress bars,
+// double-click. Shows today's total and a per-tool breakdown with progress bars,
 // and a 7-day sparkline. The history/projects sub-pages land in phase 5.
 
 import { useEffect, useState } from "react";
 import {
   api,
+  cacheHitRate,
+  fmtPercent,
   fmtUsd,
   fmtTokens,
+  totalTokens,
   type DayPoint,
   type ModelBreakdown,
   type Range,
   type Summary,
 } from "../lib/api";
+import { nativeDragMouseDown } from "../lib/drag";
 import { HistoryPage } from "./HistoryPage";
 import { ProjectsPage } from "./ProjectsPage";
 
@@ -32,7 +36,7 @@ export function DetailPanel({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     setLoading(true);
-    Promise.all([api.getRangeSummary(range), api.getHistory("week"), api.getTodayByModel()])
+    Promise.all([api.getRangeSummary(range), api.getHistory("week"), api.getByModel(range)])
       .then(([s, h, m]) => {
         setSummary(s);
         setHistory(h);
@@ -42,9 +46,7 @@ export function DetailPanel({ onClose }: { onClose: () => void }) {
       .catch(() => setLoading(false));
   }, [range]);
 
-  const totalTokens = summary
-    ? summary.input_tok + summary.output_tok + summary.cache_tok
-    : 0;
+  const total = summary ? totalTokens(summary) : 0;
   const todayLabel = new Date().toLocaleDateString("zh-CN", {
     weekday: "long",
     month: "long",
@@ -60,7 +62,10 @@ export function DetailPanel({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="glass-card detail-panel">
-      <div className="panel-header" data-tauri-drag-region>
+      {/* Native Win32 drag (see src/lib/drag.ts): replaces the buggy
+          data-tauri-drag-region which hit the #10767 stuck-drag bug on
+          Windows. */}
+      <div className="panel-header" onMouseDown={nativeDragMouseDown("detail")}>
         <span className="date-label">{todayLabel}</span>
         <div className="header-actions">
           <button className="icon-btn" onClick={() => setView("history")} title="历史记录">📊</button>
@@ -70,39 +75,6 @@ export function DetailPanel({ onClose }: { onClose: () => void }) {
             window.dispatchEvent(new CustomEvent("open-settings"));
           }} title="设置">⚙</button>
           <button className="close-btn" onClick={onClose}>✕</button>
-        </div>
-      </div>
-
-      <div className="total-block">
-        <div className="total-num">
-          {loading ? "…" : fmtTokens(totalTokens)}
-          <small className="total-unit">tokens</small>
-        </div>
-        <div className="total-sub">
-          {range === "today" ? "今日" : rangeLabel(range)}花费
-          <span className="total-cost">{fmtUsd(summary?.cost_usd ?? 0)}</span>
-        </div>
-      </div>
-
-      {/* three summary chips */}
-      <div className="chip-row">
-        <div className="chip">
-          <div className="chip-k">输入</div>
-          <div className="chip-v">
-            {fmtTokens(summary?.input_tok ?? 0)} <small>tok</small>
-          </div>
-        </div>
-        <div className="chip">
-          <div className="chip-k">输出</div>
-          <div className="chip-v">
-            {fmtTokens(summary?.output_tok ?? 0)} <small>tok</small>
-          </div>
-        </div>
-        <div className="chip">
-          <div className="chip-k">缓存</div>
-          <div className="chip-v">
-            {fmtTokens(summary?.cache_tok ?? 0)} <small>tok</small>
-          </div>
         </div>
       </div>
 
@@ -119,34 +91,15 @@ export function DetailPanel({ onClose }: { onClose: () => void }) {
         ))}
       </div>
 
-      {/* per-model breakdown (mirrors cc-switch's itemized list) */}
-      <div className="tool-section">
-        <div className="section-title">按模型明细</div>
-        {byModel.map((m) => {
-          const tt = m.input_tok + m.output_tok + m.cache_tok;
-          if (tt === 0) return null;
-          return (
-            <div className="model-detail" key={m.model + m.tool}>
-              <div className="model-head">
-                <span
-                  className="model-dot"
-                  style={{ background: TOOL_COLOR[m.tool] ?? "#888" }}
-                />
-                <span className="model-name">{m.model}</span>
-                {!m.priced && <span className="unpriced-tag">未定价</span>}
-                <span className="model-cost">{fmtUsd(m.cost_usd)}</span>
-              </div>
-              <div className="model-stats">
-                <span>新增输入 {fmtTokens(m.input_tok)}</span>
-                <span>输出 {fmtTokens(m.output_tok)}</span>
-                <span>命中缓存 {fmtTokens(m.cache_tok)}</span>
-              </div>
-            </div>
-          );
-        })}
-        {byModel.length === 0 && (
-          <div className="empty-state">该时段暂无使用记录</div>
-        )}
+      <div className="total-block">
+        <div className="total-num">
+          {loading ? "…" : fmtTokens(total)}
+          <small className="total-unit">tokens</small>
+        </div>
+        <div className="total-sub">
+          {range === "today" ? "今日" : rangeLabel(range)}花费
+          <span className="total-cost">{fmtUsd(summary?.cost_usd ?? 0)}</span>
+        </div>
       </div>
 
       {/* 7-day trend: each column shows date + bar + tokens + cost */}
@@ -161,6 +114,39 @@ export function DetailPanel({ onClose }: { onClose: () => void }) {
             ))}
           </div>
         )}
+      </div>
+
+      {/* per-model breakdown (mirrors cc-switch's itemized list) */}
+      <div className="tool-section">
+        <div className="section-title">按模型明细</div>
+        {byModel.map((m) => {
+          const tt = totalTokens(m);
+          if (tt === 0) return null;
+          return (
+            <div className="model-detail" key={m.model + m.tool}>
+              <div className="model-head">
+                <span
+                  className="model-dot"
+                  style={{ background: TOOL_COLOR[m.tool] ?? "#888" }}
+                />
+                <span className="model-name">
+                  {m.model}
+                  <small>真实消耗 {fmtTokens(tt)} Tokens</small>
+                </span>
+                {!m.priced && <span className="unpriced-tag">未定价</span>}
+                <span className="model-cost">{fmtUsd(m.cost_usd)}</span>
+              </div>
+              <div className="model-stats">
+                <span>输入 {fmtTokens(m.input_tok)}</span>
+                <span>输出 {fmtTokens(m.output_tok)}</span>
+                <span>命中缓存 {fmtTokens(m.cache_tok)}</span>
+                <span>写入缓存 {fmtTokens(m.cache_create_tok)}</span>
+                <span>命中率 {fmtPercent(cacheHitRate(m))}</span>
+              </div>
+            </div>
+          );
+        })}
+        {byModel.length === 0 && <div className="empty-state">该时段暂无使用记录</div>}
       </div>
 
       <div className="panel-footer">

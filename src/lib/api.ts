@@ -6,6 +6,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type Range = "today" | "week" | "month" | "all";
+export type TokenUnitMode = "compact" | "wan";
+
+const TOKEN_UNIT_MODE_KEY = "token_unit_mode";
 
 export interface ToolBreakdown {
   tool: string; // "claude" | "codex"
@@ -13,6 +16,7 @@ export interface ToolBreakdown {
   input_tok: number;
   output_tok: number;
   cache_tok: number;
+  cache_create_tok: number;
   session_count: number;
   fully_priced: boolean;
 }
@@ -22,6 +26,7 @@ export interface Summary {
   input_tok: number;
   output_tok: number;
   cache_tok: number;
+  cache_create_tok: number;
   session_count: number;
   fully_priced: boolean;
   tools: ToolBreakdown[];
@@ -40,6 +45,7 @@ export interface ProjectRow {
   input_tok: number;
   output_tok: number;
   cache_tok: number;
+  cache_create_tok: number;
   session_count: number;
   claude_tokens: number;
   codex_tokens: number;
@@ -53,6 +59,7 @@ export interface SessionRow {
   input_tok: number;
   output_tok: number;
   cache_tok: number;
+  cache_create_tok: number;
   timestamp: number;
   priced: boolean;
 }
@@ -61,7 +68,8 @@ export interface Pricing {
   model: string;
   in_per_mtok: number;
   out_per_mtok: number;
-  cache_per_mtok: number;
+  cache_read_per_mtok: number;
+  cache_create_per_mtok: number;
   builtin: boolean;
 }
 
@@ -82,8 +90,24 @@ export interface ModelBreakdown {
   input_tok: number;
   output_tok: number;
   cache_tok: number;
+  cache_create_tok: number;
   cost_usd: number;
   priced: boolean;
+}
+
+export interface ProviderUsage {
+  app_type: string;
+  provider_name: string;
+  provider_id: string;
+  mode: "balance" | "plan" | string;
+  primary_label: string;
+  primary_value: string;
+  primary_updated_text: string | null;
+  secondary_label: string | null;
+  secondary_value: string | null;
+  secondary_updated_text: string | null;
+  updated_text: string | null;
+  ok: boolean;
 }
 
 // --- commands ---
@@ -96,15 +120,27 @@ export const api = {
   getProjects: () => invoke<ProjectRow[]>("get_projects"),
   getProjectSessions: (project: string) =>
     invoke<SessionRow[]>("get_project_sessions", { project }),
+  getByModel: (range: Range) => invoke<ModelBreakdown[]>("get_by_model", { range }),
   getTodayByModel: () => invoke<ModelBreakdown[]>("get_today_by_model"),
+  getCurrentProviderUsage: (appType: "claude" | "codex") =>
+    invoke<ProviderUsage | null>("get_current_provider_usage", { appType }),
+  refreshTaskbar: () => invoke<void>("refresh_taskbar"),
   recomputeCost: () => invoke<void>("recompute_cost"),
   listPricing: () => invoke<Pricing[]>("list_pricing"),
   setPricing: (
     model: string,
     in_per_mtok: number,
     out_per_mtok: number,
-    cache_per_mtok: number
-  ) => invoke<void>("set_pricing", { model, in_per_mtok, out_per_mtok, cache_per_mtok }),
+    cache_read_per_mtok: number,
+    cache_create_per_mtok: number
+  ) =>
+    invoke<void>("set_pricing", {
+      model,
+      in_per_mtok,
+      out_per_mtok,
+      cache_read_per_mtok,
+      cache_create_per_mtok,
+    }),
   deletePricing: (model: string) => invoke<boolean>("delete_pricing", { model }),
   getUnpricedModels: () => invoke<UnpricedModel[]>("get_unpriced_models"),
   getSetting: (key: string) => invoke<string | null>("get_setting", { key }),
@@ -120,15 +156,53 @@ export function onIndexProgress(cb: (p: IndexProgress) => void): Promise<Unliste
 // --- formatting helpers (shared by every view) ---
 
 export function fmtUsd(n: number): string {
-  if (!n || n <= 0) return "$0.00";
-  if (n < 0.01) return `<$0.01`;
-  return `$${n.toFixed(2)}`;
+  if (!n || n <= 0) return "$0.0000";
+  return `$${n.toFixed(4)}`;
 }
 
 export function fmtTokens(n: number): string {
+  if (getStoredTokenUnitMode() === "wan" && n >= 10_000) {
+    return `${(n / 10_000).toFixed(1)}万`;
+  }
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`;
-  return `${n}`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return `${n.toFixed(1)}`;
+}
+
+export function getStoredTokenUnitMode(): TokenUnitMode {
+  if (typeof window === "undefined") return "compact";
+  const mode = window.localStorage.getItem(TOKEN_UNIT_MODE_KEY);
+  return mode === "wan" ? "wan" : "compact";
+}
+
+export function setStoredTokenUnitMode(mode: TokenUnitMode): void {
+  if (typeof window !== "undefined") {
+    window.localStorage.setItem(TOKEN_UNIT_MODE_KEY, mode);
+  }
+}
+
+export function totalTokens(row: {
+  input_tok: number;
+  output_tok: number;
+  cache_tok: number;
+  cache_create_tok?: number;
+}): number {
+  return row.input_tok + row.output_tok + row.cache_tok + (row.cache_create_tok ?? 0);
+}
+
+export function fmtPercent(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "0.0%";
+  return `${Math.min(n, 100).toFixed(1)}%`;
+}
+
+export function cacheHitRate(row: {
+  input_tok: number;
+  cache_tok: number;
+  cache_create_tok?: number;
+}): number {
+  const totalInputSide = row.input_tok + row.cache_tok + (row.cache_create_tok ?? 0);
+  if (totalInputSide <= 0) return 0;
+  return (row.cache_tok / totalInputSide) * 100;
 }
 
 export function fmtDate(iso: string): string {

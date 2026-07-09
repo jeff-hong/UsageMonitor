@@ -95,6 +95,7 @@ fn migrate(conn: &Connection) -> Result<(), DbError> {
             input_tok    INTEGER NOT NULL DEFAULT 0,
             output_tok   INTEGER NOT NULL DEFAULT 0,
             cache_tok    INTEGER NOT NULL DEFAULT 0,
+            cache_create_tok INTEGER NOT NULL DEFAULT 0,
             cost_usd     REAL    NOT NULL DEFAULT 0,
             priced       INTEGER NOT NULL DEFAULT 0,
             timestamp    INTEGER NOT NULL,
@@ -109,7 +110,8 @@ fn migrate(conn: &Connection) -> Result<(), DbError> {
             model          TEXT PRIMARY KEY,
             in_per_mtok    REAL NOT NULL,
             out_per_mtok   REAL NOT NULL,
-            cache_per_mtok REAL NOT NULL,
+            cache_read_per_mtok  REAL NOT NULL DEFAULT 0,
+            cache_create_per_mtok REAL NOT NULL DEFAULT 0,
             builtin        INTEGER NOT NULL DEFAULT 0
         );
 
@@ -126,6 +128,45 @@ fn migrate(conn: &Connection) -> Result<(), DbError> {
         );
         ",
     )?;
+    // Migration: older schema had a single cache_per_mtok column. If present,
+    // rename it to cache_read_per_mtok and add cache_create_per_mtok (default 0).
+    let has_old_cache: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('pricing') WHERE name='cache_per_mtok'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if has_old_cache > 0 {
+        conn.execute_batch(
+            "ALTER TABLE pricing RENAME COLUMN cache_per_mtok TO cache_read_per_mtok;
+             ALTER TABLE pricing ADD COLUMN cache_create_per_mtok REAL NOT NULL DEFAULT 0;",
+        )?;
+    }
+    let has_cache_create_price: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('pricing') WHERE name='cache_create_per_mtok'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if has_cache_create_price == 0 {
+        conn.execute_batch(
+            "ALTER TABLE pricing ADD COLUMN cache_create_per_mtok REAL NOT NULL DEFAULT 0;",
+        )?;
+    }
+    let has_cache_create_tok: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('usage_records') WHERE name='cache_create_tok'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if has_cache_create_tok == 0 {
+        conn.execute_batch(
+            "ALTER TABLE usage_records ADD COLUMN cache_create_tok INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
     set_setting_raw(conn, "db_version", &DB_VERSION.to_string())?;
     Ok(())
 }
@@ -135,16 +176,17 @@ fn migrate(conn: &Connection) -> Result<(), DbError> {
 /// against current public pricing during implementation).
 fn seed_builtin_pricing(conn: &Connection) -> Result<(), DbError> {
     let defaults = builtin_pricing();
-    let mut existing = conn.prepare("SELECT COUNT(*) FROM pricing")?;
-    let count: i64 = existing.query_row([], |r| r.get(0))?;
-    if count > 0 {
-        return Ok(());
-    }
     for p in defaults {
         conn.execute(
-            "INSERT OR IGNORE INTO pricing (model, in_per_mtok, out_per_mtok, cache_per_mtok, builtin)
-             VALUES (?1, ?2, ?3, ?4, 1)",
-            rusqlite::params![p.model, p.in_per_mtok, p.out_per_mtok, p.cache_per_mtok],
+            "INSERT INTO pricing (model, in_per_mtok, out_per_mtok, cache_read_per_mtok, cache_create_per_mtok, builtin)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1)
+             ON CONFLICT(model) DO UPDATE SET
+                in_per_mtok = excluded.in_per_mtok,
+                out_per_mtok = excluded.out_per_mtok,
+                cache_read_per_mtok = excluded.cache_read_per_mtok,
+                cache_create_per_mtok = excluded.cache_create_per_mtok
+             WHERE pricing.builtin = 1",
+            rusqlite::params![p.model, p.in_per_mtok, p.out_per_mtok, p.cache_read_per_mtok, p.cache_create_per_mtok],
         )?;
     }
     Ok(())
@@ -161,35 +203,48 @@ pub fn builtin_pricing() -> Vec<Pricing> {
             model: "claude-sonnet-4".into(),
             in_per_mtok: 3.0,
             out_per_mtok: 15.0,
-            cache_per_mtok: 0.30,
+            cache_read_per_mtok: 0.30,
+            cache_create_per_mtok: 3.75,
             builtin: true,
         },
         Pricing {
             model: "claude-opus-4".into(),
             in_per_mtok: 15.0,
             out_per_mtok: 75.0,
-            cache_per_mtok: 1.50,
+            cache_read_per_mtok: 1.50,
+            cache_create_per_mtok: 18.75,
             builtin: true,
         },
         Pricing {
             model: "claude-haiku-3.5".into(),
             in_per_mtok: 0.80,
             out_per_mtok: 4.0,
-            cache_per_mtok: 0.08,
+            cache_read_per_mtok: 0.08,
+            cache_create_per_mtok: 1.0,
+            builtin: true,
+        },
+        Pricing {
+            model: "gpt-5.5".into(),
+            in_per_mtok: 5.0,
+            out_per_mtok: 30.0,
+            cache_read_per_mtok: 0.5,
+            cache_create_per_mtok: 6.25,
             builtin: true,
         },
         Pricing {
             model: "gpt-5".into(),
             in_per_mtok: 1.25,
             out_per_mtok: 10.0,
-            cache_per_mtok: 0.125,
+            cache_read_per_mtok: 0.125,
+            cache_create_per_mtok: 1.25,
             builtin: true,
         },
         Pricing {
             model: "gpt-5-mini".into(),
             in_per_mtok: 0.25,
             out_per_mtok: 2.0,
-            cache_per_mtok: 0.025,
+            cache_read_per_mtok: 0.025,
+            cache_create_per_mtok: 0.25,
             builtin: true,
         },
     ]
@@ -212,16 +267,19 @@ pub fn upsert_pricing(
     model: &str,
     in_per_mtok: f64,
     out_per_mtok: f64,
-    cache_per_mtok: f64,
+    cache_read_per_mtok: f64,
+    cache_create_per_mtok: f64,
 ) -> Result<(), DbError> {
     conn.execute(
-        "INSERT INTO pricing (model, in_per_mtok, out_per_mtok, cache_per_mtok, builtin)
-         VALUES (?1, ?2, ?3, ?4, 0)
+        "INSERT INTO pricing (model, in_per_mtok, out_per_mtok, cache_read_per_mtok, cache_create_per_mtok, builtin)
+         VALUES (?1, ?2, ?3, ?4, ?5, 0)
          ON CONFLICT(model) DO UPDATE SET
             in_per_mtok = excluded.in_per_mtok,
             out_per_mtok = excluded.out_per_mtok,
-            cache_per_mtok = excluded.cache_per_mtok",
-        rusqlite::params![model, in_per_mtok, out_per_mtok, cache_per_mtok],
+            cache_read_per_mtok = excluded.cache_read_per_mtok,
+            cache_create_per_mtok = excluded.cache_create_per_mtok,
+            builtin = 0",
+        rusqlite::params![model, in_per_mtok, out_per_mtok, cache_read_per_mtok, cache_create_per_mtok],
     )?;
     Ok(())
 }
@@ -249,7 +307,9 @@ mod tests {
         for table in ["usage_records", "pricing", "file_state", "settings"] {
             let n: i64 = conn
                 .query_row(
-                    &format!("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}'"),
+                    &format!(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}'"
+                    ),
                     [],
                     |r| r.get(0),
                 )
@@ -270,8 +330,8 @@ mod tests {
         // Re-opening must NOT duplicate or wipe user rows. Add a custom model,
         // reopen at the same path, confirm both the custom row and seed survive.
         conn.execute(
-            "INSERT INTO pricing (model, in_per_mtok, out_per_mtok, cache_per_mtok, builtin)
-             VALUES ('glm-5.1', 0.5, 1.5, 0.05, 0)",
+            "INSERT INTO pricing (model, in_per_mtok, out_per_mtok, cache_read_per_mtok, cache_create_per_mtok, builtin)
+             VALUES ('glm-5.1', 0.5, 1.5, 0.05, 0.625, 0)",
             [],
         )
         .unwrap();
@@ -280,7 +340,11 @@ mod tests {
         let db2 = Db::open_at(&path).unwrap();
         let conn2 = db2.lock();
         let has_custom: i64 = conn2
-            .query_row("SELECT COUNT(*) FROM pricing WHERE model='glm-5.1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM pricing WHERE model='glm-5.1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(has_custom, 1, "custom pricing must survive reopen");
     }
@@ -295,8 +359,8 @@ mod tests {
             conn.execute(
                 "INSERT INTO usage_records
                    (date, tool, project, model, session_id, input_tok, output_tok,
-                    cache_tok, cost_usd, priced, timestamp, source_file)
-                 VALUES ('2026-06-19','claude','p','glm-5.1',100,200,300,400,0.01,0,999,'f.jsonl')
+                    cache_tok, cache_create_tok, cost_usd, priced, timestamp, source_file)
+                 VALUES ('2026-06-19','claude','p','glm-5.1',100,200,300,400,0,0.01,0,999,'f.jsonl')
                  ON CONFLICT(source_file, session_id, timestamp) DO UPDATE SET input_tok=excluded.input_tok",
                 [],
             )
@@ -313,7 +377,11 @@ mod tests {
         let db = temp_db();
         let conn = db.lock();
         let v: String = conn
-            .query_row("SELECT value FROM settings WHERE key='db_version'", [], |r| r.get(0))
+            .query_row(
+                "SELECT value FROM settings WHERE key='db_version'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(v, DB_VERSION.to_string());
     }
@@ -326,28 +394,14 @@ mod tests {
     /// Re-index every file for both tools from offset 0.
     fn reindex_all(db: &Db) {
         use crate::parsers::{claude::ClaudeParser, codex::CodexParser, UsageParser};
-        let parsers: Vec<Box<dyn UsageParser + Send>> = vec![
-            Box::new(ClaudeParser::new()),
-            Box::new(CodexParser::new()),
-        ];
+        let parsers: Vec<Box<dyn UsageParser + Send>> =
+            vec![Box::new(ClaudeParser::new()), Box::new(CodexParser::new())];
         for p in &parsers {
             for f in p.discover_files() {
                 let r = p.parse_file(&f, 0);
                 if !r.records.is_empty() {
                     crate::indexer::upsert_records(db, &r.records);
                 }
-            }
-        }
-    }
-
-    /// Re-index only codex files (after wiping codex rows + offsets).
-    fn reindex_codex(db: &Db) {
-        use crate::parsers::{codex::CodexParser, UsageParser};
-        let p = CodexParser::new();
-        for f in p.discover_files() {
-            let r = p.parse_file(&f, 0);
-            if !r.records.is_empty() {
-                crate::indexer::upsert_records(db, &r.records);
             }
         }
     }
@@ -365,34 +419,34 @@ mod tests {
             // So we price those two directly. The fancy names found earlier
             // (glm-5.x etc.) belonged to THIS conversation's own logs, not the
             // user's daily Claude/Codex history. Kept below for completeness.
-            // Prices mirrored from cc-switch's stored cost columns (reverse-
-            // engineered from total_cost / tokens). All in USD per 1M tokens.
-            let prices: &[(&str, f64, f64, f64)] = &[
-                // OpenAI / Codex
-                ("gpt-5.5", 5.0, 30.0, 0.5),
-                ("openai", 5.0, 30.0, 0.5), // codex placeholder
+            // (model, in, out, cache_read, cache_create) USD per 1M tokens.
+            // cache_create typically = input price * 1.25 (provider convention).
+            // Values mirrored from cc-switch's cost columns.
+            let prices: &[(&str, f64, f64, f64, f64)] = &[
+                // OpenAI / Codex (gpt-5.5)
+                ("gpt-5.5", 5.0, 30.0, 0.5, 6.25),
                 // Anthropic Claude
-                ("claude-opus-4-8", 5.0, 25.0, 0.5),
-                ("claude-opus-4.8", 5.0, 25.0, 0.5),
-                ("claude-opus-4-7", 5.0, 25.0, 0.5),
-                ("claude-fable-5", 10.0, 50.0, 1.0),
-                ("claude-sonnet-4-6", 3.0, 15.0, 0.3),
-                ("claude-haiku-4-5-20251001", 1.0, 5.0, 0.1),
-                ("<synthetic>", 3.0, 15.0, 0.3), // fallback placeholder
+                ("claude-opus-4-8", 5.0, 25.0, 0.5, 6.25),
+                ("claude-opus-4.8", 5.0, 25.0, 0.5, 6.25),
+                ("claude-opus-4-7", 5.0, 25.0, 0.5, 6.25),
+                ("claude-fable-5", 10.0, 50.0, 1.0, 12.5),
+                ("claude-sonnet-4-6", 3.0, 15.0, 0.3, 3.75),
+                ("claude-haiku-4-5-20251001", 1.0, 5.0, 0.1, 1.25),
+                ("<synthetic>", 3.0, 15.0, 0.3, 3.75),
                 // Zhipu GLM
-                ("glm-5.2", 0.5, 0.5, 0.08),
-                ("glm-5.1", 0.5, 3.48, 0.077),
-                ("glm-4.5-air", 0.11, 0.29, 0.05),
+                ("glm-5.2", 0.5, 0.5, 0.08, 0.625),
+                ("glm-5.1", 0.5, 3.48, 0.077, 0.625),
+                ("glm-4.5-air", 0.11, 0.29, 0.05, 0.14),
                 // DeepSeek
-                ("deepseek-v4-pro", 0.14, 2.94, 0.091),
-                ("deepseek-v4-flash", 0.14, 0.28, 0.0028),
-                ("deepseek-v3-2", 0.14, 2.94, 0.091),
+                ("deepseek-v4-pro", 0.14, 2.94, 0.091, 0.175),
+                ("deepseek-v4-flash", 0.14, 0.28, 0.0028, 0.175),
+                ("deepseek-v3-2", 0.14, 2.94, 0.091, 0.175),
                 // ByteDance Doubao
-                ("doubao-seed-code", 0.17, 2.29, 0.10),
-                ("doubao-seed-2.0-code", 0.17, 2.29, 0.10),
+                ("doubao-seed-code", 0.17, 2.29, 0.10, 0.2125),
+                ("doubao-seed-2.0-code", 0.17, 2.29, 0.10, 0.2125),
             ];
-            for (m, i, o, c) in prices {
-                upsert_pricing(&conn, m, *i, *o, *c).unwrap();
+            for (m, i, o, cr, cc) in prices {
+                upsert_pricing(&conn, m, *i, *o, *cr, *cc).unwrap();
             }
             println!("seeded {} custom prices", prices.len());
         }
@@ -457,13 +511,16 @@ mod tests {
     #[test]
     #[ignore]
     fn ccswitch_pricing() {
-        let path = dirs::home_dir().map(|h| h.join(".cc-switch").join("cc-switch.db")).unwrap();
+        let path = dirs::home_dir()
+            .map(|h| h.join(".cc-switch").join("cc-switch.db"))
+            .unwrap();
         let conn = Connection::open(&path).unwrap();
         // For each model, sum tokens and costs, then derive unit price =
         // total_cost / total_tokens * 1e6. De-dup codex input (subtract cache_read
         // first) so the input price reflects the real new-input rate.
-        let mut s = conn.prepare(
-            "SELECT model,
+        let mut s = conn
+            .prepare(
+                "SELECT model,
                     SUM(CAST(input_tokens AS REAL) - CAST(cache_read_tokens AS REAL)),
                     SUM(CAST(output_tokens AS REAL)),
                     SUM(CAST(cache_read_tokens AS REAL)),
@@ -473,10 +530,23 @@ mod tests {
              FROM proxy_request_logs
              WHERE model IS NOT NULL
              GROUP BY model ORDER BY SUM(CAST(total_cost_usd AS REAL)) DESC",
-        ).unwrap();
-        let rows: Vec<(String, f64, f64, f64, f64, f64, f64)> = s.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
-        }).unwrap().filter_map(Result::ok).collect();
+            )
+            .unwrap();
+        let rows: Vec<(String, f64, f64, f64, f64, f64, f64)> = s
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            })
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
         for (m, inp, out, cr, ic, oc, crc) in &rows {
             let in_p = if *inp > 0.0 { ic / inp * 1e6 } else { 0.0 };
             let out_p = if *out > 0.0 { oc / out * 1e6 } else { 0.0 };
@@ -495,7 +565,9 @@ mod tests {
         use chrono::Timelike;
         let today_local = chrono::Local::now();
         let today_ts_start = today_local
-            .with_hour(0).and_then(|d| d.with_minute(0)).and_then(|d| d.with_second(0))
+            .with_hour(0)
+            .and_then(|d| d.with_minute(0))
+            .and_then(|d| d.with_second(0))
             .and_then(|d| d.with_nanosecond(0))
             .map(|d| d.timestamp())
             .unwrap_or(0);
@@ -503,13 +575,17 @@ mod tests {
         println!("today: {today} (window {today_ts_start}..{today_ts_end})");
 
         // ---- cc-switch today ----
-        let ccpath = dirs::home_dir().map(|h| h.join(".cc-switch").join("cc-switch.db")).unwrap();
+        let ccpath = dirs::home_dir()
+            .map(|h| h.join(".cc-switch").join("cc-switch.db"))
+            .unwrap();
         let ccconn = Connection::open(&ccpath).unwrap();
         // Check the created_at range to understand its unit/scale.
         let (mn, mx, cnt): (i64, i64, i64) = ccconn
-            .query_row("SELECT MIN(created_at), MAX(created_at), COUNT(*) FROM proxy_request_logs", [], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-            })
+            .query_row(
+                "SELECT MIN(created_at), MAX(created_at), COUNT(*) FROM proxy_request_logs",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
             .unwrap();
         println!("cc-switch created_at range: min={mn} max={mx} count={cnt}");
         println!("  (today_local_start={today_ts_start}, today_local_end={today_ts_end})");
@@ -529,25 +605,33 @@ mod tests {
             .unwrap();
         let ccrows: Vec<(String, i64, i64, i64, i64, i64)> = s
             .query_map(rusqlite::params![today_ts_start, today_ts_end], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
             })
             .unwrap()
             .filter_map(Result::ok)
             .collect();
         let mut cc_total = 0i64;
-        let mut cc_cost = 0.0;
         for (app, n, inp, out, cr, cc) in &ccrows {
             let t = inp + out + cr + cc;
             cc_total += t;
             println!("  {app}: {n} reqs, input={inp} output={out} cache_read={cr} cache_create={cc} TOTAL={t}");
         }
         // cc-switch's stored cost (the authoritative figure).
-        cc_cost = ccconn.query_row(
-            "SELECT COALESCE(SUM(CAST(total_cost_usd AS REAL)),0) FROM proxy_request_logs
+        let cc_cost = ccconn
+            .query_row(
+                "SELECT COALESCE(SUM(CAST(total_cost_usd AS REAL)),0) FROM proxy_request_logs
              WHERE created_at >= ?1 AND created_at < ?2",
-            rusqlite::params![today_ts_start, today_ts_end],
-            |r| r.get::<_, f64>(0),
-        ).unwrap_or(0.0);
+                rusqlite::params![today_ts_start, today_ts_end],
+                |r| r.get::<_, f64>(0),
+            )
+            .unwrap_or(0.0);
         println!("  cc-switch today total tokens: {cc_total}, cost: ${cc_cost:.4}");
 
         // ---- ours today ----
@@ -559,42 +643,66 @@ mod tests {
                 "SELECT tool, COUNT(*),
                         COALESCE(SUM(input_tok),0),
                         COALESCE(SUM(output_tok),0),
-                        COALESCE(SUM(cache_tok),0)
+                        COALESCE(SUM(cache_tok),0),
+                        COALESCE(SUM(cache_create_tok),0)
                  FROM usage_records WHERE date = ?1 GROUP BY tool",
             )
             .unwrap();
-        let rows: Vec<(String, i64, i64, i64, i64)> = s
+        let rows: Vec<(String, i64, i64, i64, i64, i64)> = s
             .query_map(rusqlite::params![today], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
             })
             .unwrap()
             .filter_map(Result::ok)
             .collect();
         let mut our_total = 0i64;
-        for (tool, n, inp, out, cache) in &rows {
-            let t = inp + out + cache;
+        for (tool, n, inp, out, cache, cache_create) in &rows {
+            let t = inp + out + cache + cache_create;
             our_total += t;
-            println!("  {tool}: {n} records, input={inp} output={out} cache={cache} TOTAL={t}");
+            println!("  {tool}: {n} records, input={inp} output={out} cache_read={cache} cache_create={cache_create} TOTAL={t}");
         }
-        let our_cost: f64 = conn.query_row(
-            "SELECT COALESCE(SUM(cost_usd),0) FROM usage_records WHERE date=?1",
-            rusqlite::params![today],
-            |r| r.get(0),
-        ).unwrap_or(0.0);
+        let our_cost: f64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(cost_usd),0) FROM usage_records WHERE date=?1",
+                rusqlite::params![today],
+                |r| r.get(0),
+            )
+            .unwrap_or(0.0);
         println!("  ours today total tokens: {our_total}, cost: ${our_cost:.4}");
-        println!("\n=== DIFF tokens: cc-ours={}, cost: ${:.4} - ${:.4} = ${:.4} ===",
-            cc_total - our_total, cc_cost, our_cost, cc_cost - our_cost);
+        println!(
+            "\n=== DIFF tokens: cc-ours={}, cost: ${:.4} - ${:.4} = ${:.4} ===",
+            cc_total - our_total,
+            cc_cost,
+            our_cost,
+            cc_cost - our_cost
+        );
 
         // Dump our today codex records in detail to see if total_tokens caused
         // double counting.
         println!("\n=== our today codex records ===");
         let mut s = conn
-            .prepare("SELECT session_id, model, input_tok, output_tok, cache_tok, timestamp
-                      FROM usage_records WHERE date = ?1 AND tool='codex' ORDER BY timestamp")
+            .prepare(
+                "SELECT session_id, model, input_tok, output_tok, cache_tok, timestamp
+                      FROM usage_records WHERE date = ?1 AND tool='codex' ORDER BY timestamp",
+            )
             .unwrap();
         let rows: Vec<(String, String, i64, i64, i64, i64)> = s
             .query_map(rusqlite::params![today], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
             })
             .unwrap()
             .filter_map(Result::ok)
@@ -612,7 +720,6 @@ mod tests {
     #[test]
     #[ignore]
     fn inspect_ccswitch() {
-
         let path = dirs::home_dir()
             .map(|h| h.join(".cc-switch").join("cc-switch.db"))
             .expect("home dir");
@@ -639,21 +746,29 @@ mod tests {
         println!("\n=== sample rows (5) ===");
         let col_names: Vec<String> = info.iter().map(|(c, _)| c.clone()).collect();
         let cols = col_names.join(", ");
-        let mut stmt = conn.prepare(&format!("SELECT {cols} FROM proxy_request_logs ORDER BY created_at DESC LIMIT 5")).unwrap();
-        let rows = stmt.query_map([], |r| {
-            let mut vals = Vec::new();
-            for i in 0..col_names.len() {
-                let v = match r.get_ref(i)? {
-                    rusqlite::types::ValueRef::Integer(n) => n.to_string(),
-                    rusqlite::types::ValueRef::Real(n) => format!("{n:.4}"),
-                    rusqlite::types::ValueRef::Text(s) => String::from_utf8_lossy(s).into_owned(),
-                    rusqlite::types::ValueRef::Null => "NULL".into(),
-                    rusqlite::types::ValueRef::Blob(_) => "<blob>".into(),
-                };
-                vals.push(format!("{}={}", col_names[i], v));
-            }
-            Ok(vals.join(" | "))
-        }).unwrap();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {cols} FROM proxy_request_logs ORDER BY created_at DESC LIMIT 5"
+            ))
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| {
+                let mut vals = Vec::new();
+                for i in 0..col_names.len() {
+                    let v = match r.get_ref(i)? {
+                        rusqlite::types::ValueRef::Integer(n) => n.to_string(),
+                        rusqlite::types::ValueRef::Real(n) => format!("{n:.4}"),
+                        rusqlite::types::ValueRef::Text(s) => {
+                            String::from_utf8_lossy(s).into_owned()
+                        }
+                        rusqlite::types::ValueRef::Null => "NULL".into(),
+                        rusqlite::types::ValueRef::Blob(_) => "<blob>".into(),
+                    };
+                    vals.push(format!("{}={}", col_names[i], v));
+                }
+                Ok(vals.join(" | "))
+            })
+            .unwrap();
         for row in rows {
             println!("  {}", row.unwrap());
         }
@@ -662,7 +777,9 @@ mod tests {
         for col in ["app_type", "data_source", "provider_id", "status_code"] {
             println!("\n=== distinct {col} ===");
             let mut s = conn
-                .prepare(&format!("SELECT {col}, COUNT(*) FROM proxy_request_logs GROUP BY {col} ORDER BY 2 DESC"))
+                .prepare(&format!(
+                    "SELECT {col}, COUNT(*) FROM proxy_request_logs GROUP BY {col} ORDER BY 2 DESC"
+                ))
                 .unwrap();
             let vals: Vec<(String, i64)> = s
                 .query_map([], |r| {
@@ -685,8 +802,14 @@ mod tests {
             .unwrap();
         let vals: Vec<(String, i64, f64, f64)> = s
             .query_map([], |r| {
-                Ok((r.get::<_, Option<String>>(0).unwrap_or_default().unwrap_or_else(|| "NULL".into()),
-                     r.get(1)?, r.get(2)?, r.get(3)?))
+                Ok((
+                    r.get::<_, Option<String>>(0)
+                        .unwrap_or_default()
+                        .unwrap_or_else(|| "NULL".into()),
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                ))
             })
             .unwrap()
             .filter_map(Result::ok)

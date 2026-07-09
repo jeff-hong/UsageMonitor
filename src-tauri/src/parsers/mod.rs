@@ -19,11 +19,12 @@ pub struct TokenCounts {
     pub input: u64,
     pub output: u64,
     pub cache: u64,
+    pub cache_create: u64,
 }
 
 impl TokenCounts {
     pub fn total(self) -> u64 {
-        self.input + self.output + self.cache
+        self.input + self.output + self.cache + self.cache_create
     }
 }
 
@@ -90,7 +91,7 @@ mod integration {
         for f in files.iter().take(50) {
             let r = p.parse_file(f, 0);
             for rec in &r.records {
-                tokens += rec.input_tok + rec.output_tok + rec.cache_tok;
+                tokens += rec.input_tok + rec.output_tok + rec.cache_tok + rec.cache_create_tok;
             }
             total += r.records.len();
         }
@@ -109,7 +110,7 @@ mod integration {
         for f in files.iter().take(50) {
             let r = p.parse_file(f, 0);
             for rec in &r.records {
-                tokens += rec.input_tok + rec.output_tok + rec.cache_tok;
+                tokens += rec.input_tok + rec.output_tok + rec.cache_tok + rec.cache_create_tok;
             }
             total += r.records.len();
         }

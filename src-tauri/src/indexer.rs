@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use tauri::{AppHandle, Emitter};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 use crate::db::{self, Db};
 use crate::models::{Tool, UsageRecord};
@@ -39,7 +39,13 @@ pub fn initial_full_index(db: Db, app: AppHandle) {
         // index if either condition holds:
         //  - Claude rows still carry the "<synthetic>" placeholder model
         //  - Codex rows predate the cache-read de-duplication (v2)
-        let (synthetic, dedup_marker): (i64, i64) = {
+        let (
+            synthetic,
+            dedup_marker,
+            cache_tiers_marker,
+            ccswitch_token_marker,
+            ccswitch_project_marker,
+        ): (i64, i64, i64, i64, i64) = {
             let conn = db.lock();
             let s = conn
                 .query_row(
@@ -55,10 +61,36 @@ pub fn initial_full_index(db: Db, app: AppHandle) {
                     |r| r.get::<_, i64>(0),
                 )
                 .unwrap_or(0);
-            (s, m)
+            let c = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM settings WHERE key='cache_tiers_v1'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap_or(0);
+            let t = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM settings WHERE key='ccswitch_token_v2'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap_or(0);
+            let p = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM settings WHERE key='ccswitch_project_v1'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap_or(0);
+            (s, m, c, t, p)
         };
-        if synthetic > 0 || dedup_marker == 0 {
-            tracing::info!("rebuilding index (synthetic={synthetic}, dedup_v2={dedup_marker})");
+        if synthetic > 0
+            || dedup_marker == 0
+            || cache_tiers_marker == 0
+            || ccswitch_token_marker == 0
+            || ccswitch_project_marker == 0
+        {
+            tracing::info!("rebuilding index (synthetic={synthetic}, dedup_v2={dedup_marker}, cache_tiers_v1={cache_tiers_marker}, ccswitch_token_v2={ccswitch_token_marker}, ccswitch_project_v1={ccswitch_project_marker})");
             {
                 let conn = db.lock();
                 let _ = conn.execute("DELETE FROM usage_records", []);
@@ -68,17 +100,50 @@ pub fn initial_full_index(db: Db, app: AppHandle) {
                      ON CONFLICT(key) DO UPDATE SET value='1'",
                     [],
                 );
+                let _ = conn.execute(
+                    "INSERT INTO settings(key,value) VALUES('cache_tiers_v1','1')
+                     ON CONFLICT(key) DO UPDATE SET value='1'",
+                    [],
+                );
+                let _ = conn.execute(
+                    "INSERT INTO settings(key,value) VALUES('ccswitch_token_v2','1')
+                     ON CONFLICT(key) DO UPDATE SET value='1'",
+                    [],
+                );
+                let _ = conn.execute(
+                    "INSERT INTO settings(key,value) VALUES('ccswitch_project_v1','1')
+                     ON CONFLICT(key) DO UPDATE SET value='1'",
+                    [],
+                );
             }
         } else {
-            let _ = app.emit("index-progress", IndexProgress { indexed: 0, total: 0, done: true });
+            let _ = app.emit(
+                "index-progress",
+                IndexProgress {
+                    indexed: 0,
+                    total: 0,
+                    done: true,
+                },
+            );
             return;
         }
     }
 
-    let parsers: Vec<Box<dyn UsageParser + Send>> = vec![
-        Box::new(ClaudeParser::new()),
-        Box::new(CodexParser::new()),
-    ];
+    if import_ccswitch_all(&db) {
+        mark_indexed(&db);
+        let _ = app.emit(
+            "index-progress",
+            IndexProgress {
+                indexed: 1,
+                total: 1,
+                done: true,
+            },
+        );
+        return;
+    }
+
+    let parsers: Vec<Box<dyn UsageParser + Send>> =
+        vec![Box::new(ClaudeParser::new()), Box::new(CodexParser::new())];
 
     // Collect all files up front so we can report a real total.
     let mut files: Vec<(Box<dyn UsageParser + Send>, PathBuf)> = Vec::new();
@@ -102,7 +167,11 @@ pub fn initial_full_index(db: Db, app: AppHandle) {
         if indexed % 10 == 0 || indexed == total {
             let _ = app.emit(
                 "index-progress",
-                IndexProgress { indexed, total, done: false },
+                IndexProgress {
+                    indexed,
+                    total,
+                    done: false,
+                },
             );
         }
     }
@@ -110,17 +179,23 @@ pub fn initial_full_index(db: Db, app: AppHandle) {
     mark_indexed(&db);
     let _ = app.emit(
         "index-progress",
-        IndexProgress { indexed, total, done: true },
+        IndexProgress {
+            indexed,
+            total,
+            done: true,
+        },
     );
 }
 
 /// Incremental scan: re-parse every "today" file from its stored offset.
 /// Cheap because today's files are few and we resume mid-file.
 pub fn incremental_scan(db: Db) {
-    let parsers: Vec<Box<dyn UsageParser + Send>> = vec![
-        Box::new(ClaudeParser::new()),
-        Box::new(CodexParser::new()),
-    ];
+    if import_ccswitch_today(&db) {
+        return;
+    }
+
+    let parsers: Vec<Box<dyn UsageParser + Send>> =
+        vec![Box::new(ClaudeParser::new()), Box::new(CodexParser::new())];
     for parser in parsers {
         for file in today_files(parser.as_ref()) {
             let start = stored_offset(&db, parser.tool(), &file);
@@ -161,6 +236,10 @@ fn is_indexed(db: &Db) -> bool {
 fn mark_indexed(db: &Db) {
     let conn = db.lock();
     let _ = db::set_setting_raw(&conn, "indexed", "1");
+    let _ = db::set_setting_raw(&conn, "codex_dedup_v2", "1");
+    let _ = db::set_setting_raw(&conn, "cache_tiers_v1", "1");
+    let _ = db::set_setting_raw(&conn, "ccswitch_token_v2", "1");
+    let _ = db::set_setting_raw(&conn, "ccswitch_project_v1", "1");
 }
 
 fn stored_offset(db: &Db, _tool: Tool, file: &std::path::Path) -> u64 {
@@ -189,6 +268,177 @@ fn set_file_state(db: &Db, tool: Tool, file: &std::path::Path, offset: u64) {
     );
 }
 
+fn ccswitch_db_path() -> Option<PathBuf> {
+    dirs::home_dir()
+        .map(|h| h.join(".cc-switch").join("cc-switch.db"))
+        .filter(|p| p.exists())
+}
+
+pub(crate) fn import_ccswitch_all(db: &Db) -> bool {
+    let Some(path) = ccswitch_db_path() else {
+        return false;
+    };
+    let Ok(cc_conn) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return false;
+    };
+    let rows = read_ccswitch_rows(&cc_conn, None);
+    if rows.is_empty() {
+        return false;
+    }
+    let mut conn = db.lock();
+    let _ = conn.execute("DELETE FROM usage_records", []);
+    let _ = conn.execute("DELETE FROM file_state", []);
+    insert_ccswitch_rows(&mut conn, &rows);
+    true
+}
+
+pub(crate) fn import_ccswitch_today(db: &Db) -> bool {
+    let Some(path) = ccswitch_db_path() else {
+        return false;
+    };
+    let Ok(cc_conn) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return false;
+    };
+    let start = local_day_start_epoch();
+    let rows = read_ccswitch_rows(&cc_conn, Some(start));
+    if rows.is_empty() {
+        return true;
+    }
+    let today = epoch_to_local_date(start);
+    let mut conn = db.lock();
+    let _ = conn.execute(
+        "DELETE FROM usage_records WHERE source_file LIKE 'cc-switch:%' AND date = ?1",
+        rusqlite::params![today],
+    );
+    insert_ccswitch_rows(&mut conn, &rows);
+    true
+}
+
+#[derive(Debug)]
+struct CcSwitchRow {
+    request_id: String,
+    app_type: String,
+    model: String,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+    total_cost_usd: f64,
+    session_id: String,
+    created_at: i64,
+}
+
+fn read_ccswitch_rows(conn: &Connection, since_epoch: Option<i64>) -> Vec<CcSwitchRow> {
+    let where_clause = since_epoch.map(|_| "WHERE created_at >= ?1").unwrap_or("");
+    let sql = format!(
+        "SELECT request_id, app_type, model, request_model,
+                COALESCE(input_tokens,0), COALESCE(output_tokens,0),
+                COALESCE(cache_read_tokens,0), COALESCE(cache_creation_tokens,0),
+                COALESCE(CAST(total_cost_usd AS REAL),0),
+                session_id, created_at
+         FROM proxy_request_logs {where_clause}
+         ORDER BY created_at, request_id"
+    );
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return vec![];
+    };
+    let map_row = |r: &rusqlite::Row<'_>| {
+        let model = r
+            .get::<_, Option<String>>(2)?
+            .or(r.get::<_, Option<String>>(3)?)
+            .unwrap_or_else(|| "unknown".to_string());
+        Ok(CcSwitchRow {
+            request_id: r.get::<_, String>(0)?,
+            app_type: r
+                .get::<_, Option<String>>(1)?
+                .unwrap_or_else(|| "unknown".to_string()),
+            model,
+            input_tokens: r.get::<_, i64>(4)?.max(0) as u64,
+            output_tokens: r.get::<_, i64>(5)?.max(0) as u64,
+            cache_read_tokens: r.get::<_, i64>(6)?.max(0) as u64,
+            cache_creation_tokens: r.get::<_, i64>(7)?.max(0) as u64,
+            total_cost_usd: r.get::<_, f64>(8)?,
+            session_id: r
+                .get::<_, Option<String>>(9)?
+                .unwrap_or_else(|| r.get::<_, String>(0).unwrap_or_default()),
+            created_at: r.get::<_, i64>(10)?,
+        })
+    };
+    let rows = if let Some(since) = since_epoch {
+        stmt.query_map(rusqlite::params![since], map_row)
+    } else {
+        stmt.query_map([], map_row)
+    };
+    rows.map(|rs| rs.filter_map(Result::ok).collect())
+        .unwrap_or_default()
+}
+
+fn insert_ccswitch_rows(conn: &mut Connection, rows: &[CcSwitchRow]) {
+    let tx = conn.transaction().unwrap();
+    for r in rows {
+        let tool = match r.app_type.as_str() {
+            "claude" => "claude",
+            "codex" => "codex",
+            _ => continue,
+        };
+        let project = ccswitch_project_label(tool);
+        let _ = tx.execute(
+            "INSERT INTO usage_records
+               (date, tool, project, model, session_id, input_tok, output_tok,
+                cache_tok, cache_create_tok, cost_usd, priced, timestamp, source_file)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1,?11,?12)
+             ON CONFLICT(source_file, session_id, timestamp) DO UPDATE SET
+                project=excluded.project, model=excluded.model, input_tok=excluded.input_tok,
+                output_tok=excluded.output_tok, cache_tok=excluded.cache_tok,
+                cache_create_tok=excluded.cache_create_tok, cost_usd=excluded.cost_usd,
+                priced=1",
+            rusqlite::params![
+                epoch_to_local_date(r.created_at),
+                tool,
+                project,
+                r.model,
+                r.session_id,
+                r.input_tokens as i64,
+                r.output_tokens as i64,
+                r.cache_read_tokens as i64,
+                r.cache_creation_tokens as i64,
+                r.total_cost_usd,
+                r.created_at,
+                format!("cc-switch:{}", r.request_id),
+            ],
+        );
+    }
+    let _ = tx.commit();
+}
+
+fn ccswitch_project_label(tool: &str) -> &'static str {
+    match tool {
+        "claude" => "Claude Code",
+        "codex" => "Codex",
+        _ => "未分组",
+    }
+}
+
+fn local_day_start_epoch() -> i64 {
+    use chrono::{Local, Timelike};
+    Local::now()
+        .with_hour(0)
+        .and_then(|d| d.with_minute(0))
+        .and_then(|d| d.with_second(0))
+        .and_then(|d| d.with_nanosecond(0))
+        .map(|d| d.timestamp())
+        .unwrap_or(0)
+}
+
+fn epoch_to_local_date(epoch: i64) -> String {
+    use chrono::{Local, TimeZone};
+    Local
+        .timestamp_opt(epoch, 0)
+        .single()
+        .map(|d| d.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| "1970-01-01".to_string())
+}
+
 /// Persist records, computing each one's cost from the pricing table. Bulk-load
 /// pricing once per call to avoid a query per record.
 pub(crate) fn upsert_records(db: &Db, records: &[UsageRecord]) {
@@ -200,16 +450,23 @@ pub(crate) fn upsert_records(db: &Db, records: &[UsageRecord]) {
     let tx = conn.transaction().unwrap();
     {
         for r in records {
-            let (cost, priced) = compute_cost(&pricing, &r.model, r.input_tok, r.output_tok, r.cache_tok);
+            let (cost, priced) = compute_cost(
+                &pricing,
+                &r.model,
+                r.input_tok,
+                r.output_tok,
+                r.cache_tok,
+                r.cache_create_tok,
+            );
             let _ = tx.execute(
                 "INSERT INTO usage_records
                    (date, tool, project, model, session_id, input_tok, output_tok,
-                    cache_tok, cost_usd, priced, timestamp, source_file)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+                    cache_tok, cache_create_tok, cost_usd, priced, timestamp, source_file)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
                  ON CONFLICT(source_file, session_id, timestamp) DO UPDATE SET
                     input_tok=excluded.input_tok, output_tok=excluded.output_tok,
-                    cache_tok=excluded.cache_tok, cost_usd=excluded.cost_usd,
-                    priced=excluded.priced",
+                    cache_tok=excluded.cache_tok, cache_create_tok=excluded.cache_create_tok,
+                    cost_usd=excluded.cost_usd, priced=excluded.priced",
                 rusqlite::params![
                     r.date,
                     db::tool_to_str(r.tool),
@@ -219,6 +476,7 @@ pub(crate) fn upsert_records(db: &Db, records: &[UsageRecord]) {
                     r.input_tok as i64,
                     r.output_tok as i64,
                     r.cache_tok as i64,
+                    r.cache_create_tok as i64,
                     cost,
                     if priced { 1 } else { 0 },
                     r.timestamp,
@@ -230,17 +488,27 @@ pub(crate) fn upsert_records(db: &Db, records: &[UsageRecord]) {
     let _ = tx.commit();
 }
 
-fn load_pricing_map(conn: &Connection) -> HashMap<String, (f64, f64, f64)> {
+fn load_pricing_map(conn: &Connection) -> HashMap<String, (f64, f64, f64, f64)> {
     let mut map = HashMap::new();
-    let Ok(mut stmt) = conn.prepare("SELECT model, in_per_mtok, out_per_mtok, cache_per_mtok FROM pricing")
-    else {
+    // cache_read_per_mtok may be absent on very old DBs (pre-4-tier); fall back
+    // to cache_create column name then 0.
+    let sql = "SELECT model, in_per_mtok, out_per_mtok,
+                      COALESCE(cache_read_per_mtok, 0),
+                      COALESCE(cache_create_per_mtok, 0)
+               FROM pricing";
+    let Ok(mut stmt) = conn.prepare(sql) else {
         return map;
     };
     let rows = stmt
         .query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
-                (r.get::<_, f64>(1)?, r.get::<_, f64>(2)?, r.get::<_, f64>(3)?),
+                (
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, f64>(2)?,
+                    r.get::<_, f64>(3)?,
+                    r.get::<_, f64>(4)?,
+                ),
             ))
         })
         .ok();
@@ -252,21 +520,25 @@ fn load_pricing_map(conn: &Connection) -> HashMap<String, (f64, f64, f64)> {
     map
 }
 
-/// cost = input/1e6*in + output/1e6*out + cache/1e6*cache. Returns (cost, priced).
-/// Unknown model -> (0.0, false); the UI then shows `—`.
+/// cost = billable_input*in + output*out + cache_read*cr + cache_create*cc (per 1M).
+/// Returns (cost, priced). Unknown model -> (0.0, false); UI shows `—`.
 fn compute_cost(
-    pricing: &HashMap<String, (f64, f64, f64)>,
+    pricing: &HashMap<String, (f64, f64, f64, f64)>,
     model: &str,
     input: u64,
     output: u64,
-    cache: u64,
+    cache_read: u64,
+    cache_create: u64,
 ) -> (f64, bool) {
-    let Some((in_p, out_p, cache_p)) = pricing.get(model) else {
+    let Some((in_p, out_p, cr_p, cc_p)) = pricing.get(model) else {
         return (0.0, false);
     };
-    let cost = input as f64 / 1_000_000.0 * in_p
-        + output as f64 / 1_000_000.0 * out_p
-        + cache as f64 / 1_000_000.0 * cache_p;
+    let m = 1_000_000.0;
+    let billable_input = input.saturating_sub(cache_read);
+    let cost = billable_input as f64 / m * in_p
+        + output as f64 / m * out_p
+        + cache_read as f64 / m * cr_p
+        + cache_create as f64 / m * cc_p;
     (cost, true)
 }
 
@@ -276,10 +548,13 @@ pub fn recompute_all(db: &Db) {
     let conn = db.lock();
     let _ = conn.execute(
         "UPDATE usage_records SET
-            cost_usd = input_tok/1000000.0 * (SELECT in_per_mtok   FROM pricing p WHERE p.model = usage_records.model)
-                      + output_tok/1000000.0 * (SELECT out_per_mtok  FROM pricing p WHERE p.model = usage_records.model)
-                      + cache_tok/1000000.0  * (SELECT cache_per_mtok FROM pricing p WHERE p.model = usage_records.model),
-            priced = CASE WHEN EXISTS(SELECT 1 FROM pricing p WHERE p.model = usage_records.model) THEN 1 ELSE 0 END",
+            cost_usd = (CASE WHEN input_tok > cache_tok THEN input_tok - cache_tok ELSE 0 END)/1000000.0
+                        * (SELECT in_per_mtok         FROM pricing p WHERE p.model = usage_records.model)
+                      + output_tok/1000000.0       * (SELECT out_per_mtok        FROM pricing p WHERE p.model = usage_records.model)
+                      + cache_tok/1000000.0        * (SELECT cache_read_per_mtok FROM pricing p WHERE p.model = usage_records.model)
+                      + cache_create_tok/1000000.0 * (SELECT cache_create_per_mtok FROM pricing p WHERE p.model = usage_records.model),
+            priced = CASE WHEN EXISTS(SELECT 1 FROM pricing p WHERE p.model = usage_records.model) THEN 1 ELSE 0 END
+         WHERE source_file NOT LIKE 'cc-switch:%'",
         [],
     );
 }
@@ -318,18 +593,19 @@ mod tests {
     #[test]
     fn cost_known_model_matches_formula() {
         let mut p = HashMap::new();
-        p.insert("gpt-5".into(), (1.25, 10.0, 0.125));
-        // 2M input, 0.5M output, 1M cache
-        let (cost, priced) = compute_cost(&p, "gpt-5", 2_000_000, 500_000, 1_000_000);
+        p.insert("gpt-5".into(), (1.25, 10.0, 0.125, 1.25));
+        // 2M raw input, 0.5M output, 1M cache read, 0.4M cache write
+        let (cost, priced) = compute_cost(&p, "gpt-5", 2_000_000, 500_000, 1_000_000, 400_000);
         assert!(priced);
-        // 2 * 1.25 + 0.5 * 10 + 1 * 0.125 = 2.5 + 5 + 0.125 = 7.625
-        assert!((cost - 7.625).abs() < 1e-9, "cost was {cost}");
+        // (2-1)*1.25 + 0.5*10 + 1*0.125 + 0.4*1.25 = 6.875
+        assert!((cost - 6.875).abs() < 1e-9, "cost was {cost}");
     }
 
     #[test]
     fn cost_unknown_model_is_unpriced() {
-        let p = HashMap::<String, (f64, f64, f64)>::new();
-        let (cost, priced) = compute_cost(&p, "glm-5.1", 1_000_000, 1_000_000, 1_000_000);
+        let p = HashMap::<String, (f64, f64, f64, f64)>::new();
+        let (cost, priced) =
+            compute_cost(&p, "glm-5.1", 1_000_000, 1_000_000, 1_000_000, 1_000_000);
         assert!(!priced);
         assert_eq!(cost, 0.0);
     }
@@ -347,6 +623,7 @@ mod tests {
             input_tok: 1_000_000,
             output_tok: 200_000,
             cache_tok: 0,
+            cache_create_tok: 0,
             timestamp: 100,
             source_file: PathBuf::from("f.jsonl"),
         };
@@ -399,12 +676,37 @@ mod tests {
         }
         let conn = db.lock();
         let (n, cost): (i64, f64) = conn
-            .query_row("SELECT COUNT(*), COALESCE(SUM(cost_usd),0) FROM usage_records", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(cost_usd),0) FROM usage_records",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .unwrap();
         println!("files: {files}, parsed: {total_records}, in db: {n}, cost: ${cost:.4}");
         assert!(n > 0, "expected real records indexed");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Import cc-switch's own accounting DB into the live app database.
+    /// Run with:
+    ///   cargo test --lib indexer::tests::sync_live_ccswitch -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn sync_live_ccswitch() {
+        let db = db::Db::open().unwrap();
+        assert!(
+            import_ccswitch_all(&db),
+            "expected cc-switch rows to import"
+        );
+        mark_indexed(&db);
+        let conn = db.lock();
+        let (rows, cost): (i64, f64) = conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(cost_usd),0) FROM usage_records",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        println!("cc-switch rows imported: {rows}, total cost: ${cost:.4}");
     }
 }

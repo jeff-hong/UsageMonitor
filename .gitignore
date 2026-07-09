@@ -25,3 +25,8 @@ pnpm-debug.log*
 target/
 yarn-debug.log*
 yarn-error.log*
+
+# Temp analysis artifacts (reverse-engineering output, screenshots, scripts)
+recovered-assets/
+recovered-corrupt/
+.zcode/

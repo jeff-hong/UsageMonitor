@@ -6,9 +6,11 @@ import {
   api,
   fmtUsd,
   fmtTokens,
+  totalTokens,
   type ProjectRow,
   type SessionRow,
 } from "../lib/api";
+import { nativeDragMouseDown } from "../lib/drag";
 
 export function ProjectsPage({ onBack }: { onBack: () => void }) {
   const [projects, setProjects] = useState<ProjectRow[]>([]);
@@ -31,7 +33,7 @@ export function ProjectsPage({ onBack }: { onBack: () => void }) {
 
   return (
     <div className="glass-card sub-page">
-      <div className="page-head" data-tauri-drag-region>
+      <div className="page-head" onMouseDown={nativeDragMouseDown("detail")}>
         <span className="back" onClick={onBack}>‹</span>
         <span className="page-title">按项目</span>
       </div>
@@ -40,7 +42,7 @@ export function ProjectsPage({ onBack }: { onBack: () => void }) {
       </div>
 
       {projects.map((p) => {
-        const tokens = p.input_tok + p.output_tok + p.cache_tok;
+        const tokens = totalTokens(p);
         const pct = totalCost > 0 ? (p.cost_usd / totalCost) * 100 : 0;
         const totalToolTok = p.claude_tokens + p.codex_tokens;
         const claudeShare = totalToolTok > 0 ? (p.claude_tokens / totalToolTok) * 100 : 0;
@@ -79,7 +81,7 @@ export function ProjectsPage({ onBack }: { onBack: () => void }) {
               <div className="proj-sessions">
                 {sessions.length === 0 && <div className="empty-mini">加载中…</div>}
                 {sessions.map((s, i) => {
-                  const tt = s.input_tok + s.output_tok + s.cache_tok;
+                  const tt = totalTokens(s);
                   return (
                     <div className="sess-row" key={i}>
                       <span className="sess-dot" style={{ background: s.tool === "claude" ? "#ff8c42" : "#34c759" }} />

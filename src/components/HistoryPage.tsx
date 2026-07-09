@@ -2,7 +2,8 @@
 // that drills into that day's sessions. Reached from the detail panel footer.
 
 import { useEffect, useState } from "react";
-import { api, fmtUsd, fmtTokens, type DayPoint, type Range, type SessionRow } from "../lib/api";
+import { api, fmtUsd, fmtTokens, totalTokens, type DayPoint, type Range, type SessionRow } from "../lib/api";
+import { nativeDragMouseDown } from "../lib/drag";
 
 const TOOL_COLOR: Record<string, string> = { claude: "#ff8c42", codex: "#34c759" };
 const TOOL_LABEL: Record<string, string> = { claude: "Claude", codex: "Codex" };
@@ -31,7 +32,7 @@ export function HistoryPage({ onBack }: { onBack: () => void }) {
 
   return (
     <div className="glass-card sub-page">
-      <div className="page-head" data-tauri-drag-region>
+      <div className="page-head" onMouseDown={nativeDragMouseDown("detail")}>
         <span className="back" onClick={onBack}>‹</span>
         <span className="page-title">历史记录</span>
       </div>
@@ -70,12 +71,12 @@ export function HistoryPage({ onBack }: { onBack: () => void }) {
               <div className="day-sessions">
                 {sessions.length === 0 && <div className="empty-mini">加载中…</div>}
                 {sessions.map((s, i) => {
-                  const tt = s.input_tok + s.output_tok + s.cache_tok;
+                  const tt = totalTokens(s);
                   return (
                     <div className="sess-row" key={i}>
                       <span className="sess-dot" style={{ background: TOOL_COLOR[s.tool] ?? "#888" }} />
                       <div className="sess-info">
-                        <div className="sess-proj">{s.project ?? "(未知)"}</div>
+                        <div className="sess-proj">{s.project || "未分组"}</div>
                         <div className="sess-meta">
                           {TOOL_LABEL[s.tool] ?? s.tool} · {s.model} · {fmtTokens(tt)}
                         </div>

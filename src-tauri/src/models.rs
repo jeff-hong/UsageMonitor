@@ -43,22 +43,28 @@ pub struct UsageRecord {
     pub session_id: String,
     pub input_tok: u64,
     pub output_tok: u64,
+    /// Cache-read tokens (cache hits).
     pub cache_tok: u64,
+    /// Cache-write tokens (cache_creation), billed separately from cache hits.
+    pub cache_create_tok: u64,
     /// Unix seconds.
     pub timestamp: i64,
     pub source_file: PathBuf,
 }
 
-/// Pricing for one model, per million tokens, in USD.
-///
-/// See design doc §4.2. Unknown models have no row here; the query layer then
-/// reports `priced=false` and the UI shows `—`.
+/// Pricing for one model, per million tokens, in USD. Four cost tiers matching
+/// cc-switch's pricing model: input, output, cache read (hit), cache create
+/// (write). Unknown models have no row here; the query layer then reports
+/// `priced=false` and the UI shows `—`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Pricing {
     pub model: String,
     pub in_per_mtok: f64,
     pub out_per_mtok: f64,
-    pub cache_per_mtok: f64,
+    #[serde(rename = "cache_read_per_mtok")]
+    pub cache_read_per_mtok: f64,
+    #[serde(rename = "cache_create_per_mtok")]
+    pub cache_create_per_mtok: f64,
     pub builtin: bool,
 }
 

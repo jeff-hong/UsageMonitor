@@ -4,14 +4,33 @@
 // detected in their usage data as a prompt.
 
 import { useEffect, useState } from "react";
-import { api, fmtTokens, type Pricing, type UnpricedModel } from "../lib/api";
+import {
+  api,
+  fmtTokens,
+  getStoredTokenUnitMode,
+  setStoredTokenUnitMode,
+  type Pricing,
+  type TokenUnitMode,
+  type UnpricedModel,
+} from "../lib/api";
+import { nativeDragMouseDown } from "../lib/drag";
 
 type TaskbarMode = "tray" | "live_number" | "off";
+type PriceDraft = {
+  in: string;
+  out: string;
+  cacheRead: string;
+  cacheCreate: string;
+};
 
 const TASKBAR_LABEL: Record<TaskbarMode, string> = {
-  tray: "托盘图标",
+  tray: "普通图标",
   live_number: "实时数字",
   off: "关闭",
+};
+const TOKEN_UNIT_LABEL: Record<TokenUnitMode, string> = {
+  compact: "K/M",
+  wan: "万",
 };
 
 export function SettingsPage({
@@ -23,13 +42,15 @@ export function SettingsPage({
   const [unpriced, setUnpriced] = useState<UnpricedModel[]>([]);
   const [interval, setIntervalSec] = useState(30);
   const [taskbar, setTaskbar] = useState<TaskbarMode>("tray");
+  const [tokenUnit, setTokenUnit] = useState<TokenUnitMode>(() => getStoredTokenUnitMode());
   const [newModel, setNewModel] = useState("");
-  const [draftPrice, setDraftPrice] = useState<{ in: string; out: string; cache: string }>({
+  const [draftPrice, setDraftPrice] = useState<PriceDraft>({
     in: "",
     out: "",
-    cache: "",
+    cacheRead: "",
+    cacheCreate: "",
   });
-  const [editing, setEditing] = useState<Record<string, { in: string; out: string; cache: string }>>({});
+  const [editing, setEditing] = useState<Record<string, PriceDraft>>({});
   const [msg, setMsg] = useState("");
 
   const refresh = () => {
@@ -37,6 +58,11 @@ export function SettingsPage({
     api.getUnpricedModels().then(setUnpriced);
     api.getSetting("scan_interval_sec").then((v) => v && setIntervalSec(parseInt(v)));
     api.getSetting("taskbar_mode").then((v) => (v as TaskbarMode) && setTaskbar(v as TaskbarMode));
+    api.getSetting("token_unit_mode").then((v) => {
+      const mode = v === "wan" ? "wan" : "compact";
+      setTokenUnit(mode);
+      setStoredTokenUnitMode(mode);
+    });
   };
 
   useEffect(() => {
@@ -48,11 +74,18 @@ export function SettingsPage({
     setTimeout(() => setMsg(""), 2500);
   };
 
-  const savePrice = async (model: string, inV: string, outV: string, cacheV: string) => {
+  const savePrice = async (
+    model: string,
+    inV: string,
+    outV: string,
+    cacheReadV: string,
+    cacheCreateV: string
+  ) => {
     const inN = parseFloat(inV) || 0;
     const outN = parseFloat(outV) || 0;
-    const cacheN = parseFloat(cacheV) || 0;
-    await api.setPricing(model, inN, outN, cacheN);
+    const cacheReadN = parseFloat(cacheReadV) || 0;
+    const cacheCreateN = parseFloat(cacheCreateV) || 0;
+    await api.setPricing(model, inN, outN, cacheReadN, cacheCreateN);
     await api.recomputeCost();
     refresh();
     flash(`${model} 单价已保存，花费已重算`);
@@ -60,9 +93,9 @@ export function SettingsPage({
 
   const addCustom = async () => {
     if (!newModel.trim()) return;
-    await savePrice(newModel.trim(), draftPrice.in, draftPrice.out, draftPrice.cache);
+    await savePrice(newModel.trim(), draftPrice.in, draftPrice.out, draftPrice.cacheRead, draftPrice.cacheCreate);
     setNewModel("");
-    setDraftPrice({ in: "", out: "", cache: "" });
+    setDraftPrice({ in: "", out: "", cacheRead: "", cacheCreate: "" });
   };
 
   const remove = async (model: string) => {
@@ -81,12 +114,28 @@ export function SettingsPage({
   const pickTaskbar = async (m: TaskbarMode) => {
     setTaskbar(m);
     await api.setSetting("taskbar_mode", m);
+    await api.refreshTaskbar();
+    flash(
+      m === "live_number"
+        ? "任务栏已显示今日 Token 数"
+        : m === "off"
+          ? "任务栏图标已隐藏"
+          : "任务栏已切换为普通图标"
+    );
+  };
+
+  const pickTokenUnit = async (m: TokenUnitMode) => {
+    setTokenUnit(m);
+    setStoredTokenUnitMode(m);
+    await api.setSetting("token_unit_mode", m);
+    window.dispatchEvent(new CustomEvent("token-unit-mode-changed"));
+    flash(`Token 单位已切换为 ${TOKEN_UNIT_LABEL[m]}`);
   };
 
   return (
     <div className="glass-card sub-page">
-      <div className="page-head" data-tauri-drag-region>
-        <span className="back" onClick={onBack}>‹</span>
+      <div className="page-head" onMouseDown={nativeDragMouseDown("detail")}>
+        <span className="back" data-no-drag role="button" onClick={onBack}>‹</span>
         <span className="page-title">设置</span>
       </div>
 
@@ -101,7 +150,7 @@ export function SettingsPage({
             </div>
           ))}
         </div>
-        <div className="hint-note">任务栏实时数字/托盘将在后续版本实现</div>
+        <div className="hint-note">实时数字会把任务栏按钮标题更新为今日 Token 数和 Claude/Codex 分项</div>
       </Section>
 
       <Section title="扫描间隔">
@@ -118,8 +167,22 @@ export function SettingsPage({
         </div>
       </Section>
 
+      <Section title="Token 单位">
+        <div className="seg-tabs">
+          {(["compact", "wan"] as TokenUnitMode[]).map((m) => (
+            <div
+              key={m}
+              className={`tab ${tokenUnit === m ? "active" : ""}`}
+              onClick={() => pickTokenUnit(m)}
+            >
+              {TOKEN_UNIT_LABEL[m]}
+            </div>
+          ))}
+        </div>
+      </Section>
+
       {/* pricing editor — the heart of phase 5 */}
-      <Section title="模型定价 (USD / 1M tokens)">
+      <Section title="模型定价">
         {unpriced.length > 0 && (
           <div className="unpriced-box">
             <div className="unpriced-title">⚠ 检测到未定价模型（花费显示为 $0）</div>
@@ -142,7 +205,8 @@ export function SettingsPage({
             const e = editing[p.model] ?? {
               in: String(p.in_per_mtok),
               out: String(p.out_per_mtok),
-              cache: String(p.cache_per_mtok),
+              cacheRead: String(p.cache_read_per_mtok),
+              cacheCreate: String(p.cache_create_per_mtok),
             };
             return (
               <div className="price-row" key={p.model}>
@@ -152,7 +216,7 @@ export function SettingsPage({
                 </div>
                 <div className="price-inputs">
                   <label>
-                    输入
+                    输入成本 (每百万 tokens, USD)
                     <input
                       type="number"
                       step="0.01"
@@ -163,7 +227,7 @@ export function SettingsPage({
                     />
                   </label>
                   <label>
-                    输出
+                    输出成本 (每百万 tokens, USD)
                     <input
                       type="number"
                       step="0.01"
@@ -174,19 +238,30 @@ export function SettingsPage({
                     />
                   </label>
                   <label>
-                    缓存
+                    缓存读取成本 (每百万 tokens, USD)
                     <input
                       type="number"
                       step="0.01"
-                      value={e.cache}
+                      value={e.cacheRead}
                       onChange={(ev) =>
-                        setEditing({ ...editing, [p.model]: { ...e, cache: ev.target.value } })
+                        setEditing({ ...editing, [p.model]: { ...e, cacheRead: ev.target.value } })
+                      }
+                    />
+                  </label>
+                  <label>
+                    缓存写入成本 (每百万 tokens, USD)
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={e.cacheCreate}
+                      onChange={(ev) =>
+                        setEditing({ ...editing, [p.model]: { ...e, cacheCreate: ev.target.value } })
                       }
                     />
                   </label>
                 </div>
                 <div className="price-actions">
-                  <button onClick={() => savePrice(p.model, e.in, e.out, e.cache)}>保存</button>
+                  <button onClick={() => savePrice(p.model, e.in, e.out, e.cacheRead, e.cacheCreate)}>保存</button>
                   {!p.builtin && <button className="danger" onClick={() => remove(p.model)}>删除</button>}
                 </div>
               </div>
@@ -205,7 +280,7 @@ export function SettingsPage({
           />
           <div className="price-inputs">
             <label>
-              输入
+              输入成本 (每百万 tokens, USD)
               <input
                 type="number"
                 step="0.01"
@@ -214,7 +289,7 @@ export function SettingsPage({
               />
             </label>
             <label>
-              输出
+              输出成本 (每百万 tokens, USD)
               <input
                 type="number"
                 step="0.01"
@@ -223,12 +298,21 @@ export function SettingsPage({
               />
             </label>
             <label>
-              缓存
+              缓存读取成本 (每百万 tokens, USD)
               <input
                 type="number"
                 step="0.01"
-                value={draftPrice.cache}
-                onChange={(e) => setDraftPrice({ ...draftPrice, cache: e.target.value })}
+                value={draftPrice.cacheRead}
+                onChange={(e) => setDraftPrice({ ...draftPrice, cacheRead: e.target.value })}
+              />
+            </label>
+            <label>
+              缓存写入成本 (每百万 tokens, USD)
+              <input
+                type="number"
+                step="0.01"
+                value={draftPrice.cacheCreate}
+                onChange={(e) => setDraftPrice({ ...draftPrice, cacheCreate: e.target.value })}
               />
             </label>
           </div>
