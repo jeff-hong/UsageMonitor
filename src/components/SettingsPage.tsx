@@ -7,9 +7,12 @@ import { useEffect, useState } from "react";
 import {
   api,
   fmtTokens,
+  getStoredTheme,
   getStoredTokenUnitMode,
+  setStoredTheme,
   setStoredTokenUnitMode,
   type Pricing,
+  type ThemeMode,
   type TokenUnitMode,
   type UnpricedModel,
 } from "../lib/api";
@@ -32,6 +35,11 @@ const TOKEN_UNIT_LABEL: Record<TokenUnitMode, string> = {
   compact: "K/M",
   wan: "万",
 };
+const THEME_LABEL: Record<ThemeMode, string> = {
+  dark: "深色磨砂",
+  light: "纯白",
+  neon: "霓虹暗黑",
+};
 
 export function SettingsPage({
   onBack,
@@ -42,6 +50,7 @@ export function SettingsPage({
   const [unpriced, setUnpriced] = useState<UnpricedModel[]>([]);
   const [interval, setIntervalSec] = useState(30);
   const [taskbar, setTaskbar] = useState<TaskbarMode>("tray");
+  const [theme, setTheme] = useState<ThemeMode>(() => getStoredTheme());
   const [tokenUnit, setTokenUnit] = useState<TokenUnitMode>(() => getStoredTokenUnitMode());
   const [newModel, setNewModel] = useState("");
   const [draftPrice, setDraftPrice] = useState<PriceDraft>({
@@ -58,6 +67,11 @@ export function SettingsPage({
     api.getUnpricedModels().then(setUnpriced);
     api.getSetting("scan_interval_sec").then((v) => v && setIntervalSec(parseInt(v)));
     api.getSetting("taskbar_mode").then((v) => (v as TaskbarMode) && setTaskbar(v as TaskbarMode));
+    api.getSetting("theme").then((v) => {
+      const t = v === "light" || v === "neon" ? (v as ThemeMode) : "dark";
+      setTheme(t);
+      setStoredTheme(t);
+    });
     api.getSetting("token_unit_mode").then((v) => {
       const mode = v === "wan" ? "wan" : "compact";
       setTokenUnit(mode);
@@ -124,6 +138,13 @@ export function SettingsPage({
     );
   };
 
+  const pickTheme = async (t: ThemeMode) => {
+    setTheme(t);
+    setStoredTheme(t);
+    await api.setSetting("theme", t);
+    flash(`主题已切换为 ${THEME_LABEL[t]}`);
+  };
+
   const pickTokenUnit = async (m: TokenUnitMode) => {
     setTokenUnit(m);
     setStoredTokenUnitMode(m);
@@ -142,6 +163,17 @@ export function SettingsPage({
       {msg && <div className="flash">{msg}</div>}
 
       {/* display modes */}
+      <Section title="主题">
+        <div className="seg-tabs">
+          {(["dark", "light", "neon"] as ThemeMode[]).map((t) => (
+            <div key={t} className={`tab ${theme === t ? "active" : ""}`} onClick={() => pickTheme(t)}>
+              {THEME_LABEL[t]}
+            </div>
+          ))}
+        </div>
+        <div className="hint-note">切换全部界面的配色风格，即时生效</div>
+      </Section>
+
       <Section title="任务栏">
         <div className="seg-tabs">
           {(["tray", "live_number", "off"] as TaskbarMode[]).map((m) => (
@@ -183,6 +215,17 @@ export function SettingsPage({
 
       {/* pricing editor — the heart of phase 5 */}
       <Section title="模型定价">
+        <button
+          className="add-btn"
+          style={{ marginBottom: 12 }}
+          onClick={async () => {
+            const n = await api.syncPricingFromCcswitch();
+            refresh();
+            flash(n > 0 ? `已从 cc-switch 同步 ${n} 个模型定价` : "未检测到 cc-switch 定价数据");
+          }}
+        >
+          ⟳ 从 cc-switch 同步定价
+        </button>
         {unpriced.length > 0 && (
           <div className="unpriced-box">
             <div className="unpriced-title">⚠ 检测到未定价模型（花费显示为 $0）</div>

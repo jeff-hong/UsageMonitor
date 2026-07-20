@@ -7,8 +7,10 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type Range = "today" | "week" | "month" | "all";
 export type TokenUnitMode = "compact" | "wan";
+export type ThemeMode = "dark" | "light" | "neon";
 
 const TOKEN_UNIT_MODE_KEY = "token_unit_mode";
+const THEME_KEY = "theme";
 
 export interface ToolBreakdown {
   tool: string; // "claude" | "codex"
@@ -126,6 +128,7 @@ export const api = {
     invoke<ProviderUsage | null>("get_current_provider_usage", { appType }),
   refreshTaskbar: () => invoke<void>("refresh_taskbar"),
   recomputeCost: () => invoke<void>("recompute_cost"),
+  syncPricingFromCcswitch: () => invoke<number>("sync_pricing_from_ccswitch"),
   listPricing: () => invoke<Pricing[]>("list_pricing"),
   setPricing: (
     model: string,
@@ -178,6 +181,26 @@ export function getStoredTokenUnitMode(): TokenUnitMode {
 export function setStoredTokenUnitMode(mode: TokenUnitMode): void {
   if (typeof window !== "undefined") {
     window.localStorage.setItem(TOKEN_UNIT_MODE_KEY, mode);
+  }
+}
+
+export function getStoredTheme(): ThemeMode {
+  if (typeof window === "undefined") return "dark";
+  const t = window.localStorage.getItem(THEME_KEY);
+  return t === "light" || t === "neon" ? t : "dark";
+}
+
+export function setStoredTheme(theme: ThemeMode): void {
+  if (typeof window !== "undefined") {
+    window.localStorage.setItem(THEME_KEY, theme);
+    document.documentElement.dataset.theme = theme;
+    // Notify ALL windows (widget / detail / hover_detail) to re-apply the
+    // theme. Each Tauri webview window has its own DOM, so changing
+    // data-theme here only affects the current window — without this event
+    // the dock capsule wouldn't update when you switch theme in settings.
+    import("@tauri-apps/api/event")
+      .then(({ emit }) => emit("theme-changed", theme))
+      .catch(() => {});
   }
 }
 

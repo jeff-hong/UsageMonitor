@@ -14,6 +14,7 @@ import { HoverDetailWindow } from "./components/HoverDetailWindow";
 import { SettingsPage } from "./components/SettingsPage";
 import { CardWidget } from "./components/widgets/CardWidget";
 import { useTodaySummary } from "./hooks/useTodaySummary";
+import type { ThemeMode } from "./lib/api";
 
 const WIDGET_SIZE = { width: 150, height: 42 };
 const DETAIL_SIZE = { width: 360, height: 560 };
@@ -49,6 +50,21 @@ function placeAndShow(
 
 function App() {
   const label = getCurrentWindow().label;
+
+  // Every window listens for theme changes so the dock capsule / hover detail
+  // update instantly when you switch theme in the settings (detail) window.
+  // Without this, only the settings window's own DOM would update.
+  useEffect(() => {
+    let unlisten: UnlistenFn | null = null;
+    listen<ThemeMode>("theme-changed", (event) => {
+      document.documentElement.dataset.theme = event.payload;
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, []);
 
   if (label === "hover_detail") {
     return <HoverDetailApp />;
