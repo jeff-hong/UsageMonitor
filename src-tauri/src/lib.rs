@@ -118,6 +118,31 @@ pub fn run() {
             let db = app.state::<db::Db>().inner().clone();
             let handle = app.handle().clone();
             std::thread::spawn(move || {
+                // Sync pricing from cc-switch BEFORE indexing so the first full
+                // index already has accurate costs (163+ models from cc-switch's
+                // model_pricing table, including glm-5.x, gpt-5.x, etc.).
+                let synced = {
+                    let conn = db.lock();
+                    let prices = ccswitch::read_ccswitch_pricing();
+                    let n = prices.len();
+                    for p in &prices {
+                        let _ = conn.execute(
+                            "INSERT INTO pricing (model, in_per_mtok, out_per_mtok, cache_read_per_mtok, cache_create_per_mtok, builtin)
+                             VALUES (?1,?2,?3,?4,?5,1)
+                             ON CONFLICT(model) DO UPDATE SET
+                                in_per_mtok=excluded.in_per_mtok,
+                                out_per_mtok=excluded.out_per_mtok,
+                                cache_read_per_mtok=excluded.cache_read_per_mtok,
+                                cache_create_per_mtok=excluded.cache_create_per_mtok,
+                                builtin=1",
+                            rusqlite::params![p.model, p.in_per_mtok, p.out_per_mtok, p.cache_read_per_mtok, p.cache_create_per_mtok],
+                        );
+                    }
+                    n
+                };
+                if synced > 0 {
+                    tracing::info!("synced {synced} model prices from cc-switch");
+                }
                 indexer::initial_full_index(db.clone(), handle.clone());
                 taskbar::update_taskbar(&db, &handle);
                 loop {
@@ -165,6 +190,7 @@ pub fn run() {
             query::get_by_model,
             query::get_today_by_model,
             query::recompute_cost,
+            query::sync_pricing_from_ccswitch,
             query::set_pricing,
             query::delete_pricing,
             query::get_unpriced_models,

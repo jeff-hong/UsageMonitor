@@ -579,3 +579,55 @@ fn ccswitch_settings_path() -> PathBuf {
         .join(".cc-switch")
         .join("settings.json")
 }
+
+/// One model's pricing from cc-switch's `model_pricing` table.
+pub struct CcSwitchPrice {
+    pub model: String,
+    pub in_per_mtok: f64,
+    pub out_per_mtok: f64,
+    pub cache_read_per_mtok: f64,
+    pub cache_create_per_mtok: f64,
+}
+
+/// Read ALL model prices from cc-switch's `model_pricing` table. Returns an
+/// empty vec if cc-switch isn't installed or the table doesn't exist (graceful
+/// degradation — the caller just keeps the built-in prices).
+pub fn read_ccswitch_pricing() -> Vec<CcSwitchPrice> {
+    let Ok(conn) = open_ccswitch_db() else {
+        return vec![];
+    };
+    // Check the table exists before querying (older cc-switch versions may not
+    // have model_pricing).
+    let has_table: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='model_pricing'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n != 0)
+        .unwrap_or(false);
+    if !has_table {
+        return vec![];
+    }
+
+    let mut stmt = match conn.prepare(
+        "SELECT model_id, input_cost_per_million, output_cost_per_million,
+                cache_read_cost_per_million, cache_creation_cost_per_million
+         FROM model_pricing",
+    ) {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+    stmt.query_map([], |r| {
+        let parse = |v: String| v.parse::<f64>().unwrap_or(0.0);
+        Ok(CcSwitchPrice {
+            model: r.get::<_, String>(0)?,
+            in_per_mtok: parse(r.get::<_, String>(1)?),
+            out_per_mtok: parse(r.get::<_, String>(2)?),
+            cache_read_per_mtok: parse(r.get::<_, String>(3)?),
+            cache_create_per_mtok: parse(r.get::<_, String>(4)?),
+        })
+    })
+    .map(|rows| rows.filter_map(Result::ok).collect())
+    .unwrap_or_default()
+}

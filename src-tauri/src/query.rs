@@ -306,6 +306,38 @@ pub fn recompute_cost(state: tauri::State<'_, Db>) {
     crate::indexer::recompute_all(&state);
 }
 
+/// Sync pricing from cc-switch's `model_pricing` table into our pricing table.
+/// Upserts every cc-switch model (so new models appear + changed prices update),
+/// then recomputes all costs. Returns the number of models synced. If cc-switch
+/// isn't installed or has no model_pricing table, returns 0 (keeps built-ins).
+#[tauri::command]
+pub fn sync_pricing_from_ccswitch(state: tauri::State<'_, Db>) -> usize {
+    let prices = crate::ccswitch::read_ccswitch_pricing();
+    if prices.is_empty() {
+        return 0;
+    }
+    let conn = state.lock();
+    let mut synced = 0;
+    for p in &prices {
+        let _ = conn.execute(
+            "INSERT INTO pricing (model, in_per_mtok, out_per_mtok, cache_read_per_mtok, cache_create_per_mtok, builtin)
+             VALUES (?1,?2,?3,?4,?5,1)
+             ON CONFLICT(model) DO UPDATE SET
+                in_per_mtok=excluded.in_per_mtok,
+                out_per_mtok=excluded.out_per_mtok,
+                cache_read_per_mtok=excluded.cache_read_per_mtok,
+                cache_create_per_mtok=excluded.cache_create_per_mtok,
+                builtin=1",
+            rusqlite::params![p.model, p.in_per_mtok, p.out_per_mtok, p.cache_read_per_mtok, p.cache_create_per_mtok],
+        );
+        synced += 1;
+    }
+    drop(conn);
+    // Recompute costs with the freshly synced prices.
+    crate::indexer::recompute_all(&state);
+    synced
+}
+
 /// Insert or update one model's price. Used by the settings page to add custom
 /// models (e.g. glm-5.1) or override a builtin.
 #[tauri::command]
