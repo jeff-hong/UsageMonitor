@@ -1,4 +1,4 @@
-// Settings page: widget/taskbar mode, scan interval, and the pricing editor.
+// Settings page: appearance, scan interval, and the pricing editor.
 // The pricing editor is the key feature — it lets the user fill in custom model
 // prices (e.g. glm-5.1) so real dollar costs appear, and lists unpriced models
 // detected in their usage data as a prompt.
@@ -18,7 +18,6 @@ import {
 } from "../lib/api";
 import { nativeDragMouseDown } from "../lib/drag";
 
-type TaskbarMode = "tray" | "live_number" | "off";
 type PriceDraft = {
   in: string;
   out: string;
@@ -26,11 +25,6 @@ type PriceDraft = {
   cacheCreate: string;
 };
 
-const TASKBAR_LABEL: Record<TaskbarMode, string> = {
-  tray: "普通图标",
-  live_number: "实时数字",
-  off: "关闭",
-};
 const TOKEN_UNIT_LABEL: Record<TokenUnitMode, string> = {
   compact: "K/M",
   wan: "万",
@@ -49,7 +43,6 @@ export function SettingsPage({
   const [pricing, setPricing] = useState<Pricing[]>([]);
   const [unpriced, setUnpriced] = useState<UnpricedModel[]>([]);
   const [interval, setIntervalSec] = useState(30);
-  const [taskbar, setTaskbar] = useState<TaskbarMode>("tray");
   const [theme, setTheme] = useState<ThemeMode>(() => getStoredTheme());
   const [tokenUnit, setTokenUnit] = useState<TokenUnitMode>(() => getStoredTokenUnitMode());
   const [newModel, setNewModel] = useState("");
@@ -66,7 +59,6 @@ export function SettingsPage({
     api.listPricing().then(setPricing);
     api.getUnpricedModels().then(setUnpriced);
     api.getSetting("scan_interval_sec").then((v) => v && setIntervalSec(parseInt(v)));
-    api.getSetting("taskbar_mode").then((v) => (v as TaskbarMode) && setTaskbar(v as TaskbarMode));
     api.getSetting("theme").then((v) => {
       const t = v === "light" || v === "neon" ? (v as ThemeMode) : "dark";
       setTheme(t);
@@ -125,19 +117,6 @@ export function SettingsPage({
     flash(`扫描间隔已设为 ${v} 秒`);
   };
 
-  const pickTaskbar = async (m: TaskbarMode) => {
-    setTaskbar(m);
-    await api.setSetting("taskbar_mode", m);
-    await api.refreshTaskbar();
-    flash(
-      m === "live_number"
-        ? "任务栏已显示今日 Token 数"
-        : m === "off"
-          ? "任务栏图标已隐藏"
-          : "任务栏已切换为普通图标"
-    );
-  };
-
   const pickTheme = async (t: ThemeMode) => {
     setTheme(t);
     setStoredTheme(t);
@@ -174,17 +153,6 @@ export function SettingsPage({
         <div className="hint-note">切换全部界面的配色风格，即时生效</div>
       </Section>
 
-      <Section title="任务栏">
-        <div className="seg-tabs">
-          {(["tray", "live_number", "off"] as TaskbarMode[]).map((m) => (
-            <div key={m} className={`tab ${taskbar === m ? "active" : ""}`} onClick={() => pickTaskbar(m)}>
-              {TASKBAR_LABEL[m]}
-            </div>
-          ))}
-        </div>
-        <div className="hint-note">实时数字会把任务栏按钮标题更新为今日 Token 数和 Claude/Codex 分项</div>
-      </Section>
-
       <Section title="扫描间隔">
         <div className="interval-row">
           <input
@@ -197,6 +165,7 @@ export function SettingsPage({
           />
           <span className="interval-val">{interval} 秒</span>
         </div>
+        <div className="hint-note">控制新使用记录写入本地统计的频率，当前等待周期结束后生效</div>
       </Section>
 
       <Section title="Token 单位">

@@ -128,7 +128,6 @@ export const api = {
   getTodayByModel: () => invoke<ModelBreakdown[]>("get_today_by_model"),
   getCurrentProviderUsage: (appType: "claude" | "codex") =>
     invoke<ProviderUsage | null>("get_current_provider_usage", { appType }),
-  refreshTaskbar: () => invoke<void>("refresh_taskbar"),
   recomputeCost: () => invoke<void>("recompute_cost"),
   syncPricingFromCcswitch: () => invoke<number>("sync_pricing_from_ccswitch"),
   listPricing: () => invoke<Pricing[]>("list_pricing"),

@@ -11,7 +11,6 @@ pub mod indexer;
 pub mod models;
 pub mod parsers;
 pub mod query;
-pub mod taskbar;
 pub mod window_drag;
 pub mod widget_mouse;
 pub mod windows_topmost;
@@ -57,11 +56,6 @@ fn list_pricing(state: tauri::State<'_, db::Db>) -> Vec<Pricing> {
     })
     .map(|rows| rows.filter_map(Result::ok).collect())
     .unwrap_or_default()
-}
-
-#[tauri::command]
-fn refresh_taskbar(state: tauri::State<'_, db::Db>, app: tauri::AppHandle) {
-    taskbar::update_taskbar(&state, &app);
 }
 
 #[tauri::command]
@@ -144,7 +138,6 @@ pub fn run() {
                     tracing::info!("synced {synced} model prices from cc-switch");
                 }
                 indexer::initial_full_index(db.clone(), handle.clone());
-                taskbar::update_taskbar(&db, &handle);
                 loop {
                     // Read the interval fresh each tick so settings changes apply.
                     let secs = {
@@ -161,11 +154,8 @@ pub fn run() {
                     };
                     std::thread::sleep(std::time::Duration::from_secs(secs));
                     let snapshot = db.clone();
-                    let taskbar_db = db.clone();
-                    let taskbar_handle = handle.clone();
                     std::thread::spawn(move || {
                         indexer::incremental_scan(snapshot);
-                        taskbar::update_taskbar(&taskbar_db, &taskbar_handle);
                     });
                 }
             });
@@ -174,7 +164,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             db_status,
             list_pricing,
-            refresh_taskbar,
             quit_app,
             window_drag::start_window_drag,
             window_drag::hide_window_native,
