@@ -122,6 +122,8 @@ export const api = {
   getProjects: () => invoke<ProjectRow[]>("get_projects"),
   getProjectSessions: (project: string) =>
     invoke<SessionRow[]>("get_project_sessions", { project }),
+  getProjectByModel: (project: string) =>
+    invoke<ModelBreakdown[]>("get_project_by_model", { project }),
   getByModel: (range: Range) => invoke<ModelBreakdown[]>("get_by_model", { range }),
   getTodayByModel: () => invoke<ModelBreakdown[]>("get_today_by_model"),
   getCurrentProviderUsage: (appType: "claude" | "codex") =>

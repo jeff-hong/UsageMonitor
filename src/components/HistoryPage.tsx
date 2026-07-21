@@ -3,6 +3,7 @@
 
 import { useEffect, useState } from "react";
 import { api, fmtUsd, fmtTokens, totalTokens, type DayPoint, type Range, type SessionRow } from "../lib/api";
+import { localDateKey } from "../lib/date";
 import { nativeDragMouseDown } from "../lib/drag";
 
 const TOOL_COLOR: Record<string, string> = { claude: "#ff8c42", codex: "#34c759" };
@@ -13,22 +14,63 @@ export function HistoryPage({ onBack }: { onBack: () => void }) {
   const [days, setDays] = useState<DayPoint[]>([]);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SessionRow[]>([]);
+  const [daysLoading, setDaysLoading] = useState(true);
+  const [daysError, setDaysError] = useState(false);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [sessionsError, setSessionsError] = useState(false);
 
   useEffect(() => {
-    api.getHistory(range).then(setDays).catch(() => setDays([]));
+    let active = true;
+    setDays([]);
+    setDaysLoading(true);
+    setDaysError(false);
+    setSelectedDate(null);
+    api.getHistory(range)
+      .then((result) => {
+        if (active) setDays(result);
+      })
+      .catch(() => {
+        if (active) setDaysError(true);
+      })
+      .finally(() => {
+        if (active) setDaysLoading(false);
+      });
+    return () => {
+      active = false;
+    };
   }, [range]);
 
   useEffect(() => {
-    if (selectedDate) {
-      api.getDailySessions(selectedDate).then(setSessions).catch(() => setSessions([]));
-    } else {
-      setSessions([]);
+    let active = true;
+    setSessions([]);
+    setSessionsError(false);
+    if (!selectedDate) {
+      setSessionsLoading(false);
+      return () => {
+        active = false;
+      };
     }
+
+    setSessionsLoading(true);
+    api.getDailySessions(selectedDate)
+      .then((result) => {
+        if (active) setSessions(result);
+      })
+      .catch(() => {
+        if (active) setSessionsError(true);
+      })
+      .finally(() => {
+        if (active) setSessionsLoading(false);
+      });
+    return () => {
+      active = false;
+    };
   }, [selectedDate]);
 
   const total = days.reduce((s, d) => s + d.cost_usd, 0);
   const avg = days.length ? total / days.length : 0;
   const peak = days.reduce((m, d) => Math.max(m, d.cost_usd), 0);
+  const recordedDays = days.filter((day) => day.session_count > 0);
 
   return (
     <div className="glass-card sub-page">
@@ -38,16 +80,22 @@ export function HistoryPage({ onBack }: { onBack: () => void }) {
       </div>
 
       <div className="seg-tabs">
-        {(["week", "month", "all"] as Range[]).map((r) => (
+        {(["today", "week", "month", "all"] as Range[]).map((r) => (
           <div key={r} className={`tab ${range === r ? "active" : ""}`} onClick={() => setRange(r)}>
-            {({ week: "7天", month: "30天", all: "全部" } as Record<Range, string>)[r]}
+            {({ today: "今日", week: "7天", month: "30天", all: "全部" } as Record<Range, string>)[r]}
           </div>
         ))}
       </div>
 
       <div className="hist-chart">
         <div className="section-title">每日花费 ($)</div>
-        <LineChart days={days} />
+        {daysLoading ? (
+          <div className="chart-empty">加载中…</div>
+        ) : daysError ? (
+          <div className="chart-empty">加载失败</div>
+        ) : (
+          <LineChart days={days} />
+        )}
         <div className="hist-stats">
           <Stat k="总计" v={fmtUsd(total)} />
           <Stat k="日均" v={fmtUsd(avg)} />
@@ -56,7 +104,7 @@ export function HistoryPage({ onBack }: { onBack: () => void }) {
       </div>
 
       <div className="hist-list">
-        {[...days].reverse().map((d) => (
+        {[...recordedDays].reverse().map((d) => (
           <div key={d.date}>
             <div
               className={`day-head ${selectedDate === d.date ? "open" : ""}`}
@@ -69,7 +117,11 @@ export function HistoryPage({ onBack }: { onBack: () => void }) {
             </div>
             {selectedDate === d.date && (
               <div className="day-sessions">
-                {sessions.length === 0 && <div className="empty-mini">加载中…</div>}
+                {sessionsLoading && <div className="empty-mini">加载中…</div>}
+                {!sessionsLoading && sessionsError && <div className="empty-mini">加载失败，请重试</div>}
+                {!sessionsLoading && !sessionsError && sessions.length === 0 && (
+                  <div className="empty-mini">暂无会话记录</div>
+                )}
                 {sessions.map((s, i) => {
                   const tt = totalTokens(s);
                   return (
@@ -92,7 +144,11 @@ export function HistoryPage({ onBack }: { onBack: () => void }) {
             )}
           </div>
         ))}
-        {days.length === 0 && <div className="empty-state">该时段暂无使用记录</div>}
+        {daysLoading && <div className="empty-state">正在加载历史记录…</div>}
+        {!daysLoading && daysError && <div className="empty-state">历史记录加载失败，请重试</div>}
+        {!daysLoading && !daysError && recordedDays.length === 0 && (
+          <div className="empty-state">该时段暂无使用记录</div>
+        )}
       </div>
     </div>
   );
@@ -106,7 +162,7 @@ function LineChart({ days }: { days: DayPoint[] }) {
   const pts = days.map((d, i) => `${i * step},${H - (d.cost_usd / max) * (H - 6) - 3}`);
   const path = "M" + pts.join(" L");
   const area = path + ` L${W},${H} L0,${H} Z`;
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateKey();
   return (
     <svg className="line-chart" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
       <defs>

@@ -1,21 +1,37 @@
-// Projects page: cumulative spending ranked, with a per-project Claude/Codex
-// split bar. Clicking a project expands its session history.
+// Projects page: projects ordered by latest use, with a per-project
+// Claude/Codex split bar. Clicking a project expands its per-model spending
+// breakdown.
 
 import { useEffect, useState } from "react";
 import {
   api,
+  cacheHitRate,
+  fmtPercent,
   fmtUsd,
   fmtTokens,
   totalTokens,
+  type ModelBreakdown,
   type ProjectRow,
-  type SessionRow,
 } from "../lib/api";
 import { nativeDragMouseDown } from "../lib/drag";
+
+const TOOL_COLOR: Record<string, string> = {
+  claude: "#ff8c42",
+  codex: "#34c759",
+};
+
+// project is stored as the full cwd path (e.g. E:\AI Project\usage-monitoring).
+// Show just the last path segment as the display name; keep the full path as
+// the key + API argument so drill-down still matches.
+function projectName(fullPath: string): string {
+  const parts = fullPath.split(/[/\\]/).filter(Boolean);
+  return parts[parts.length - 1] || fullPath;
+}
 
 export function ProjectsPage({ onBack }: { onBack: () => void }) {
   const [projects, setProjects] = useState<ProjectRow[]>([]);
   const [open, setOpen] = useState<string | null>(null);
-  const [sessions, setSessions] = useState<SessionRow[]>([]);
+  const [models, setModels] = useState<ModelBreakdown[]>([]);
 
   useEffect(() => {
     api.getProjects().then(setProjects).catch(() => setProjects([]));
@@ -23,9 +39,10 @@ export function ProjectsPage({ onBack }: { onBack: () => void }) {
 
   useEffect(() => {
     if (open) {
-      api.getProjectSessions(open).then(setSessions).catch(() => setSessions([]));
+      setModels([]);
+      api.getProjectByModel(open).then(setModels).catch(() => setModels([]));
     } else {
-      setSessions([]);
+      setModels([]);
     }
   }, [open]);
 
@@ -55,7 +72,7 @@ export function ProjectsPage({ onBack }: { onBack: () => void }) {
             >
               <div className="proj-ico">📂</div>
               <div className="proj-info">
-                <div className="proj-nm">{p.project}</div>
+                <div className="proj-nm" title={p.project}>{projectName(p.project)}</div>
                 <div className="proj-mt">
                   {p.session_count} 会话 · {fmtTokens(tokens)} tok
                 </div>
@@ -79,19 +96,30 @@ export function ProjectsPage({ onBack }: { onBack: () => void }) {
             </div>
             {open === p.project && (
               <div className="proj-sessions">
-                {sessions.length === 0 && <div className="empty-mini">加载中…</div>}
-                {sessions.map((s, i) => {
-                  const tt = totalTokens(s);
+                {models.length === 0 && <div className="empty-mini">加载中…</div>}
+                {models.map((m) => {
+                  const tt = totalTokens(m);
+                  if (tt === 0) return null;
                   return (
-                    <div className="sess-row" key={i}>
-                      <span className="sess-dot" style={{ background: s.tool === "claude" ? "#ff8c42" : "#34c759" }} />
-                      <div className="sess-info">
-                        <div className="sess-proj">{s.model}</div>
-                        <div className="sess-meta">{fmtTokens(tt)} tok · {s.tool}</div>
+                    <div className="model-detail" key={m.model + m.tool}>
+                      <div className="model-head">
+                        <span
+                          className="model-dot"
+                          style={{ background: TOOL_COLOR[m.tool] ?? "#888" }}
+                        />
+                        <span className="model-name">
+                          {m.model}
+                          <small>真实消耗 {fmtTokens(tt)} Tokens</small>
+                        </span>
+                        {!m.priced && <span className="unpriced-tag">未定价</span>}
+                        <span className="model-cost">{fmtUsd(m.cost_usd)}</span>
                       </div>
-                      <div className="sess-amt">
-                        {fmtUsd(s.cost_usd)}
-                        {!s.priced && <small> 未定价</small>}
+                      <div className="model-stats">
+                        <span>输入 {fmtTokens(m.input_tok)}</span>
+                        <span>输出 {fmtTokens(m.output_tok)}</span>
+                        <span>命中缓存 {fmtTokens(m.cache_tok)}</span>
+                        <span>写入缓存 {fmtTokens(m.cache_create_tok)}</span>
+                        <span>命中率 {fmtPercent(cacheHitRate(m))}</span>
                       </div>
                     </div>
                   );

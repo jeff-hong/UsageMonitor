@@ -8,6 +8,8 @@
 
 use crate::db::{self, Db};
 use crate::models::Range;
+use chrono::{Duration, Local, NaiveDate};
+use std::collections::BTreeMap;
 
 /// One tool's contribution within a summary.
 #[derive(serde::Serialize)]
@@ -96,7 +98,15 @@ fn today_str() -> String {
 
 const BILLABLE_INPUT_SQL: &str =
     "CASE WHEN input_tok > cache_tok THEN input_tok - cache_tok ELSE 0 END";
-const PROJECT_LABEL_SQL: &str = "COALESCE(NULLIF(project,''),'未分组')";
+const PROJECT_LABEL_SQL: &str = "COALESCE(NULLIF(TRIM(project),''),'未分组')";
+// Windows paths are case-insensitive. Claude and Codex may still serialize the
+// same cwd with different slash styles, casing, whitespace, or a trailing slash.
+const PROJECT_KEY_SQL: &str = "CASE
+    WHEN project IS NULL OR TRIM(project) = '' THEN '未分组'
+    ELSE LOWER(REPLACE(RTRIM(TRIM(project), '/\\'), '\\', '/'))
+END";
+const PROJECT_PARAM_KEY_SQL: &str =
+    "LOWER(REPLACE(RTRIM(TRIM(?1), '/\\'), '\\', '/'))";
 
 fn read_summary(conn: &rusqlite::Connection, where_clause: &str) -> Summary {
     let base = format!(
@@ -206,6 +216,10 @@ pub fn get_range_summary(state: tauri::State<'_, Db>, range: Range) -> Summary {
 #[tauri::command]
 pub fn get_history(state: tauri::State<'_, Db>, range: Range) -> Vec<DayPoint> {
     let conn = state.lock();
+    read_history(&conn, range)
+}
+
+fn read_history(conn: &rusqlite::Connection, range: Range) -> Vec<DayPoint> {
     let sql = format!(
         "SELECT date,
                 COALESCE(SUM(cost_usd),0),
@@ -217,21 +231,76 @@ pub fn get_history(state: tauri::State<'_, Db>, range: Range) -> Vec<DayPoint> {
     let Ok(mut stmt) = conn.prepare(&sql) else {
         return vec![];
     };
-    stmt.query_map([], |r| {
-        Ok(DayPoint {
-            date: r.get(0)?,
-            cost_usd: r.get(1)?,
-            tokens: r.get::<_, i64>(2)? as u64,
-            session_count: r.get::<_, i64>(3)? as usize,
+    let points = stmt
+        .query_map([], |r| {
+            Ok(DayPoint {
+                date: r.get(0)?,
+                cost_usd: r.get(1)?,
+                tokens: r.get::<_, i64>(2)? as u64,
+                session_count: r.get::<_, i64>(3)? as usize,
+            })
         })
-    })
-    .map(|rows| rows.filter_map(Result::ok).collect())
-    .unwrap_or_default()
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default();
+    fill_history_gaps(range, points)
+}
+
+/// 将查询区间内没有记录的自然日补为零值，避免趋势图把日期间隔压缩。
+/// 7/30 天的起始边界沿用现有 `range_clause` 语义，不在这里调整。
+fn fill_history_gaps(range: Range, points: Vec<DayPoint>) -> Vec<DayPoint> {
+    if points.is_empty() {
+        return points;
+    }
+
+    let today = Local::now().date_naive();
+    let first_recorded = parse_day(&points[0].date).unwrap_or(today);
+    let last_recorded = points
+        .last()
+        .and_then(|point| parse_day(&point.date))
+        .unwrap_or(today);
+    let start = match range {
+        Range::Today => today,
+        Range::Week => today - Duration::days(7),
+        Range::Month => today - Duration::days(30),
+        Range::All => first_recorded,
+    };
+    let end = today.max(last_recorded);
+    let mut by_date: BTreeMap<String, DayPoint> = points
+        .into_iter()
+        .map(|point| (point.date.clone(), point))
+        .collect();
+    let mut filled = Vec::new();
+    let mut current = start;
+
+    while current <= end {
+        let date = current.format("%Y-%m-%d").to_string();
+        filled.push(by_date.remove(&date).unwrap_or(DayPoint {
+            date,
+            cost_usd: 0.0,
+            tokens: 0,
+            session_count: 0,
+        }));
+        let Some(next) = current.succ_opt() else {
+            break;
+        };
+        current = next;
+    }
+
+    filled.extend(by_date.into_values());
+    filled
+}
+
+fn parse_day(date: &str) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()
 }
 
 #[tauri::command]
 pub fn get_daily_sessions(state: tauri::State<'_, Db>, date: String) -> Vec<SessionRow> {
     let conn = state.lock();
+    read_daily_sessions(&conn, &date)
+}
+
+fn read_daily_sessions(conn: &rusqlite::Connection, date: &str) -> Vec<SessionRow> {
     let Ok(mut stmt) = conn.prepare(
         &format!(
         "SELECT tool, {PROJECT_LABEL_SQL}, model, COALESCE(SUM(cost_usd),0),
@@ -241,7 +310,8 @@ pub fn get_daily_sessions(state: tauri::State<'_, Db>, date: String) -> Vec<Sess
                 MAX(timestamp), MIN(priced)
          FROM usage_records
          WHERE date = ?1
-         GROUP BY session_id ORDER BY MAX(timestamp) DESC"),
+         GROUP BY session_id, tool, {PROJECT_LABEL_SQL}, model
+         ORDER BY MAX(timestamp) DESC"),
     ) else {
         return vec![];
     };
@@ -266,9 +336,24 @@ pub fn get_daily_sessions(state: tauri::State<'_, Db>, date: String) -> Vec<Sess
 #[tauri::command]
 pub fn get_projects(state: tauri::State<'_, Db>) -> Vec<ProjectRow> {
     let conn = state.lock();
-    let Ok(mut stmt) = conn.prepare(
-        &format!(
-        "SELECT {PROJECT_LABEL_SQL},
+    read_projects(&conn)
+}
+
+fn read_projects(conn: &rusqlite::Connection) -> Vec<ProjectRow> {
+    let Ok(mut stmt) = conn.prepare(&format!(
+        "WITH normalized AS (
+            SELECT id, timestamp, tool, session_id, input_tok, output_tok,
+                   cache_tok, cache_create_tok, cost_usd,
+                   {PROJECT_LABEL_SQL} AS project_label,
+                   {PROJECT_KEY_SQL} AS project_key
+            FROM usage_records
+         ), ranked AS (
+            SELECT *, ROW_NUMBER() OVER (
+                PARTITION BY project_key ORDER BY timestamp DESC, id DESC
+            ) AS project_rank
+            FROM normalized
+         )
+         SELECT MAX(CASE WHEN project_rank=1 THEN project_label END),
                 COALESCE(SUM(cost_usd),0),
                 COALESCE(SUM(CASE WHEN input_tok > cache_tok THEN input_tok - cache_tok ELSE 0 END),0),
                 COALESCE(SUM(output_tok),0),
@@ -277,9 +362,10 @@ pub fn get_projects(state: tauri::State<'_, Db>) -> Vec<ProjectRow> {
                 COUNT(DISTINCT session_id),
                 COALESCE(SUM(CASE WHEN tool='claude' THEN (CASE WHEN input_tok > cache_tok THEN input_tok - cache_tok ELSE 0 END)+output_tok+cache_tok+cache_create_tok END),0),
                 COALESCE(SUM(CASE WHEN tool='codex'  THEN (CASE WHEN input_tok > cache_tok THEN input_tok - cache_tok ELSE 0 END)+output_tok+cache_tok+cache_create_tok END),0)
-         FROM usage_records GROUP BY {PROJECT_LABEL_SQL}
-         ORDER BY COALESCE(SUM(cost_usd),0) DESC"),
-    ) else {
+         FROM ranked
+         GROUP BY project_key
+         ORDER BY MAX(timestamp) DESC, project_key ASC"
+    )) else {
         return vec![];
     };
     stmt.query_map([], |r| {
@@ -416,7 +502,7 @@ pub fn get_project_sessions(state: tauri::State<'_, Db>, project: String) -> Vec
                 COALESCE(SUM(cache_tok),0), COALESCE(SUM(cache_create_tok),0),
                 MAX(timestamp), MIN(priced)
          FROM usage_records
-         WHERE {PROJECT_LABEL_SQL} = ?1
+         WHERE {PROJECT_KEY_SQL} = {PROJECT_PARAM_KEY_SQL}
          GROUP BY session_id ORDER BY MAX(timestamp) DESC"),
     ) else {
         return vec![];
@@ -487,6 +573,40 @@ pub fn get_by_model(state: tauri::State<'_, Db>, range: Range) -> Vec<ModelBreak
     .unwrap_or_default()
 }
 
+/// Usage within one project, broken down per model — drives the projects-page
+/// drill-down. Mirrors `get_by_model` but filtered to a single project label.
+#[tauri::command]
+pub fn get_project_by_model(state: tauri::State<'_, Db>, project: String) -> Vec<ModelBreakdown> {
+    let conn = state.lock();
+    let Ok(mut stmt) = conn.prepare(&format!(
+        "SELECT model, tool,
+                COALESCE(SUM(CASE WHEN input_tok > cache_tok THEN input_tok - cache_tok ELSE 0 END),0),
+                COALESCE(SUM(output_tok),0),
+                COALESCE(SUM(cache_tok),0),
+                COALESCE(SUM(cache_create_tok),0),
+                COALESCE(SUM(cost_usd),0),
+                CASE WHEN MIN(priced)=1 THEN 1 ELSE 0 END
+         FROM usage_records WHERE {PROJECT_KEY_SQL} = {PROJECT_PARAM_KEY_SQL}
+         GROUP BY model, tool ORDER BY COALESCE(SUM(cost_usd),0) DESC"
+    )) else {
+        return vec![];
+    };
+    stmt.query_map(rusqlite::params![project], |r| {
+        Ok(ModelBreakdown {
+            model: r.get(0)?,
+            tool: r.get(1)?,
+            input_tok: r.get::<_, i64>(2)? as u64,
+            output_tok: r.get::<_, i64>(3)? as u64,
+            cache_tok: r.get::<_, i64>(4)? as u64,
+            cache_create_tok: r.get::<_, i64>(5)? as u64,
+            cost_usd: r.get(6)?,
+            priced: r.get::<_, i64>(7)? == 1,
+        })
+    })
+    .map(|rows| rows.filter_map(Result::ok).collect())
+    .unwrap_or_default()
+}
+
 #[tauri::command]
 pub fn get_today_by_model(state: tauri::State<'_, Db>) -> Vec<ModelBreakdown> {
     let conn = state.lock();
@@ -520,7 +640,7 @@ pub fn get_today_by_model(state: tauri::State<'_, Db>) -> Vec<ModelBreakdown> {
     .unwrap_or_default()
 }
 
-/// Read a settings value (scan interval, widget/taskbar mode). Empty if unset.
+/// Read an application setting. Empty if unset.
 #[tauri::command]
 pub fn get_setting(state: tauri::State<'_, Db>, key: String) -> Option<String> {
     let conn = state.lock();
@@ -621,20 +741,99 @@ mod tests {
     }
 
     #[test]
-    fn projects_ranked_by_cost() {
+    fn history_fills_days_without_usage() {
         let db = seeded_db();
         let conn = db.lock();
-        let sql = "SELECT COALESCE(NULLIF(project,''),'未分组'), COALESCE(SUM(cost_usd),0)
-                   FROM usage_records GROUP BY COALESCE(NULLIF(project,''),'未分组')
-                   ORDER BY COALESCE(SUM(cost_usd),0) DESC";
-        let mut stmt = conn.prepare(sql).unwrap();
-        let rows: Vec<(String, f64)> = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-            .unwrap()
-            .filter_map(Result::ok)
+        let rows = read_history(&conn, Range::Week);
+
+        // 保留既有区间边界：今天加此前 7 天，共 8 个自然日。
+        assert_eq!(rows.len(), 8);
+        assert_eq!(rows.last().unwrap().date, today_str());
+        assert_eq!(rows.last().unwrap().session_count, 2);
+        assert_eq!(rows.iter().filter(|row| row.session_count == 0).count(), 7);
+    }
+
+    #[test]
+    fn daily_sessions_keep_model_and_project_dimensions() {
+        let db = seeded_db();
+        let extra = UsageRecord {
+            date: today_str(),
+            tool: Tool::Claude,
+            project: Some("P2".into()),
+            model: "claude-opus-4-1".into(),
+            session_id: "s1".into(),
+            input_tok: 0,
+            output_tok: 100,
+            cache_tok: 0,
+            timestamp: 10,
+            cache_create_tok: 0,
+            source_file: PathBuf::from("f4"),
+        };
+        crate::indexer::upsert_records(&db, &[extra]);
+
+        let conn = db.lock();
+        let rows = read_daily_sessions(&conn, &today_str());
+        assert_eq!(rows.len(), 3);
+        assert!(rows
+            .iter()
+            .any(|row| row.model == "claude-sonnet-4" && row.project.as_deref() == Some("P1")));
+        assert!(rows
+            .iter()
+            .any(|row| row.model == "claude-opus-4-1" && row.project.as_deref() == Some("P2")));
+    }
+
+    #[test]
+    fn projects_ordered_by_last_use() {
+        let db = seeded_db();
+        let conn = db.lock();
+        let rows = read_projects(&conn);
+        // The ungrouped record has the latest timestamp (3), so it comes before
+        // P1 even though its cost is zero.
+        assert_eq!(rows[0].project, "未分组");
+        assert_eq!(rows[1].project, "P1");
+    }
+
+    #[test]
+    fn projects_merge_equivalent_windows_paths() {
+        let db = seeded_db();
+        let variants = vec![
+            UsageRecord {
+                date: today_str(),
+                tool: Tool::Claude,
+                project: Some("E:\\Work\\Demo".into()),
+                model: "claude-sonnet-4".into(),
+                session_id: "variant-1".into(),
+                input_tok: 1,
+                output_tok: 0,
+                cache_tok: 0,
+                timestamp: 100,
+                cache_create_tok: 0,
+                source_file: PathBuf::from("variant-1"),
+            },
+            UsageRecord {
+                date: today_str(),
+                tool: Tool::Codex,
+                project: Some("e:/work/demo/".into()),
+                model: "gpt-5".into(),
+                session_id: "variant-2".into(),
+                input_tok: 1,
+                output_tok: 0,
+                cache_tok: 0,
+                timestamp: 101,
+                cache_create_tok: 0,
+                source_file: PathBuf::from("variant-2"),
+            },
+        ];
+        crate::indexer::upsert_records(&db, &variants);
+
+        let conn = db.lock();
+        let rows = read_projects(&conn);
+        let demo: Vec<&ProjectRow> = rows
+            .iter()
+            .filter(|p| p.project.to_ascii_lowercase().contains("work"))
             .collect();
-        // P1 = 13.0 (today) ; 未分组 = 0 (unpriced)
-        assert_eq!(rows[0].0, "P1");
-        assert!((rows[0].1 - 13.0).abs() < 1e-9);
+        assert_eq!(demo.len(), 1, "equivalent path spellings must be one project");
+        assert_eq!(demo[0].session_count, 2);
+        assert_eq!(demo[0].project, "e:/work/demo/");
     }
 }

@@ -16,6 +16,7 @@ import {
   type Summary,
 } from "../lib/api";
 import { nativeDragMouseDown } from "../lib/drag";
+import { localDateKey } from "../lib/date";
 import { HistoryPage } from "./HistoryPage";
 import { ProjectsPage } from "./ProjectsPage";
 
@@ -35,15 +36,22 @@ export function DetailPanel({ onClose }: { onClose: () => void }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    let active = true;
     setLoading(true);
     Promise.all([api.getRangeSummary(range), api.getHistory("week"), api.getByModel(range)])
       .then(([s, h, m]) => {
+        if (!active) return;
         setSummary(s);
         setHistory(h);
         setByModel(m);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
   }, [range]);
 
   const total = summary ? totalTokens(summary) : 0;
@@ -105,7 +113,7 @@ export function DetailPanel({ onClose }: { onClose: () => void }) {
       {/* 7-day trend: each column shows date + bar + tokens + cost */}
       <div className="spark-section">
         <div className="section-title">近 7 天用量</div>
-        {history.length < 2 ? (
+        {!history.some((day) => day.session_count > 0) ? (
           <div className="spark-empty">数据不足</div>
         ) : (
           <div className="spark-grid">
@@ -181,7 +189,7 @@ function SparkCol({
   day: DayPoint;
   maxTok: number;
 }) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateKey();
   const isToday = day.date === today;
   const h = Math.max(8, Math.round((day.tokens / maxTok) * 100));
   return (

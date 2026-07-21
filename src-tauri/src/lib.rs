@@ -187,6 +187,7 @@ pub fn run() {
             query::get_daily_sessions,
             query::get_projects,
             query::get_project_sessions,
+            query::get_project_by_model,
             query::get_by_model,
             query::get_today_by_model,
             query::recompute_cost,

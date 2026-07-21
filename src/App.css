@@ -1096,24 +1096,29 @@ select {
   width: 0;
   height: 0;
 }
-.detail-panel .model-detail {
+.detail-panel .model-detail,
+.proj-sessions .model-detail {
   padding: 10px 0;
 }
-.detail-panel .model-detail + .model-detail {
+.detail-panel .model-detail + .model-detail,
+.proj-sessions .model-detail + .model-detail {
   border-top: 1px solid var(--dark-border);
 }
-.detail-panel .model-head {
+.detail-panel .model-head,
+.proj-sessions .model-head {
   display: flex;
   align-items: center;
   gap: 8px;
 }
-.detail-panel .model-dot {
+.detail-panel .model-dot,
+.proj-sessions .model-dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
   flex-shrink: 0;
 }
-.detail-panel .model-name {
+.detail-panel .model-name,
+.proj-sessions .model-name {
   font-size: 12px;
   font-weight: 600;
   flex: 1;
@@ -1123,18 +1128,21 @@ select {
   align-items: baseline;
   gap: 6px;
 }
-.detail-panel .model-name small {
+.detail-panel .model-name small,
+.proj-sessions .model-name small {
   font-size: 9px;
   font-weight: 500;
   opacity: 0.55;
   white-space: nowrap;
 }
-.detail-panel .model-cost {
+.detail-panel .model-cost,
+.proj-sessions .model-cost {
   font-size: 13px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
-.detail-panel .model-stats {
+.detail-panel .model-stats,
+.proj-sessions .model-stats {
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
@@ -1143,7 +1151,8 @@ select {
   margin-top: 4px;
   padding-left: 15px;
 }
-.detail-panel .unpriced-tag {
+.detail-panel .unpriced-tag,
+.proj-sessions .unpriced-tag {
   margin-left: 6px;
   color: var(--accent-warn);
   font-size: 9px;
