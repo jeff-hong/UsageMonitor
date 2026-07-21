@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use tauri::{AppHandle, Emitter};
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::Connection;
 
 use crate::db::{self, Db};
 use crate::models::{Tool, UsageRecord};
@@ -36,16 +36,20 @@ pub struct IndexProgress {
 pub fn initial_full_index(db: Db, app: AppHandle) {
     if is_indexed(&db) {
         // One-time data fixes for older parser versions. Rebuild the whole
-        // index if either condition holds:
+        // index if any condition holds:
         //  - Claude rows still carry the "<synthetic>" placeholder model
         //  - Codex rows predate the cache-read de-duplication (v2)
+        //  - Usage was imported from cc-switch and therefore has no real cwd
+        //  - Codex rows predate turn_context model extraction
         let (
             synthetic,
             dedup_marker,
             cache_tiers_marker,
             ccswitch_token_marker,
             ccswitch_project_marker,
-        ): (i64, i64, i64, i64, i64) = {
+            ccswitch_usage_rows,
+            codex_model_marker,
+        ): (i64, i64, i64, i64, i64, i64, i64) = {
             let conn = db.lock();
             let s = conn
                 .query_row(
@@ -82,15 +86,31 @@ pub fn initial_full_index(db: Db, app: AppHandle) {
                     |r| r.get::<_, i64>(0),
                 )
                 .unwrap_or(0);
-            (s, m, c, t, p)
+            let u = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM usage_records WHERE source_file LIKE 'cc-switch:%'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap_or(0);
+            let cm = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM settings WHERE key='codex_turn_context_model_v1'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap_or(0);
+            (s, m, c, t, p, u, cm)
         };
         if synthetic > 0
             || dedup_marker == 0
             || cache_tiers_marker == 0
             || ccswitch_token_marker == 0
             || ccswitch_project_marker == 0
+            || ccswitch_usage_rows > 0
+            || codex_model_marker == 0
         {
-            tracing::info!("rebuilding index (synthetic={synthetic}, dedup_v2={dedup_marker}, cache_tiers_v1={cache_tiers_marker}, ccswitch_token_v2={ccswitch_token_marker}, ccswitch_project_v1={ccswitch_project_marker})");
+            tracing::info!("rebuilding native-log index (synthetic={synthetic}, dedup_v2={dedup_marker}, cache_tiers_v1={cache_tiers_marker}, ccswitch_token_v2={ccswitch_token_marker}, ccswitch_project_v1={ccswitch_project_marker}, ccswitch_usage_rows={ccswitch_usage_rows}, codex_turn_context_model_v1={codex_model_marker})");
             {
                 let conn = db.lock();
                 let _ = conn.execute("DELETE FROM usage_records", []);
@@ -115,6 +135,11 @@ pub fn initial_full_index(db: Db, app: AppHandle) {
                      ON CONFLICT(key) DO UPDATE SET value='1'",
                     [],
                 );
+                let _ = conn.execute(
+                    "INSERT INTO settings(key,value) VALUES('codex_turn_context_model_v1','1')
+                     ON CONFLICT(key) DO UPDATE SET value='1'",
+                    [],
+                );
             }
         } else {
             let _ = app.emit(
@@ -127,19 +152,6 @@ pub fn initial_full_index(db: Db, app: AppHandle) {
             );
             return;
         }
-    }
-
-    if import_ccswitch_all(&db) {
-        mark_indexed(&db);
-        let _ = app.emit(
-            "index-progress",
-            IndexProgress {
-                indexed: 1,
-                total: 1,
-                done: true,
-            },
-        );
-        return;
     }
 
     let parsers: Vec<Box<dyn UsageParser + Send>> =
@@ -190,10 +202,6 @@ pub fn initial_full_index(db: Db, app: AppHandle) {
 /// Incremental scan: re-parse every "today" file from its stored offset.
 /// Cheap because today's files are few and we resume mid-file.
 pub fn incremental_scan(db: Db) {
-    if import_ccswitch_today(&db) {
-        return;
-    }
-
     let parsers: Vec<Box<dyn UsageParser + Send>> =
         vec![Box::new(ClaudeParser::new()), Box::new(CodexParser::new())];
     for parser in parsers {
@@ -240,6 +248,7 @@ fn mark_indexed(db: &Db) {
     let _ = db::set_setting_raw(&conn, "cache_tiers_v1", "1");
     let _ = db::set_setting_raw(&conn, "ccswitch_token_v2", "1");
     let _ = db::set_setting_raw(&conn, "ccswitch_project_v1", "1");
+    let _ = db::set_setting_raw(&conn, "codex_turn_context_model_v1", "1");
 }
 
 fn stored_offset(db: &Db, _tool: Tool, file: &std::path::Path) -> u64 {
@@ -266,177 +275,6 @@ fn set_file_state(db: &Db, tool: Tool, file: &std::path::Path, offset: u64) {
             chrono::Local::now().timestamp(),
         ],
     );
-}
-
-fn ccswitch_db_path() -> Option<PathBuf> {
-    dirs::home_dir()
-        .map(|h| h.join(".cc-switch").join("cc-switch.db"))
-        .filter(|p| p.exists())
-}
-
-pub(crate) fn import_ccswitch_all(db: &Db) -> bool {
-    let Some(path) = ccswitch_db_path() else {
-        return false;
-    };
-    let Ok(cc_conn) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
-        return false;
-    };
-    let rows = read_ccswitch_rows(&cc_conn, None);
-    if rows.is_empty() {
-        return false;
-    }
-    let mut conn = db.lock();
-    let _ = conn.execute("DELETE FROM usage_records", []);
-    let _ = conn.execute("DELETE FROM file_state", []);
-    insert_ccswitch_rows(&mut conn, &rows);
-    true
-}
-
-pub(crate) fn import_ccswitch_today(db: &Db) -> bool {
-    let Some(path) = ccswitch_db_path() else {
-        return false;
-    };
-    let Ok(cc_conn) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
-        return false;
-    };
-    let start = local_day_start_epoch();
-    let rows = read_ccswitch_rows(&cc_conn, Some(start));
-    if rows.is_empty() {
-        return true;
-    }
-    let today = epoch_to_local_date(start);
-    let mut conn = db.lock();
-    let _ = conn.execute(
-        "DELETE FROM usage_records WHERE source_file LIKE 'cc-switch:%' AND date = ?1",
-        rusqlite::params![today],
-    );
-    insert_ccswitch_rows(&mut conn, &rows);
-    true
-}
-
-#[derive(Debug)]
-struct CcSwitchRow {
-    request_id: String,
-    app_type: String,
-    model: String,
-    input_tokens: u64,
-    output_tokens: u64,
-    cache_read_tokens: u64,
-    cache_creation_tokens: u64,
-    total_cost_usd: f64,
-    session_id: String,
-    created_at: i64,
-}
-
-fn read_ccswitch_rows(conn: &Connection, since_epoch: Option<i64>) -> Vec<CcSwitchRow> {
-    let where_clause = since_epoch.map(|_| "WHERE created_at >= ?1").unwrap_or("");
-    let sql = format!(
-        "SELECT request_id, app_type, model, request_model,
-                COALESCE(input_tokens,0), COALESCE(output_tokens,0),
-                COALESCE(cache_read_tokens,0), COALESCE(cache_creation_tokens,0),
-                COALESCE(CAST(total_cost_usd AS REAL),0),
-                session_id, created_at
-         FROM proxy_request_logs {where_clause}
-         ORDER BY created_at, request_id"
-    );
-    let Ok(mut stmt) = conn.prepare(&sql) else {
-        return vec![];
-    };
-    let map_row = |r: &rusqlite::Row<'_>| {
-        let model = r
-            .get::<_, Option<String>>(2)?
-            .or(r.get::<_, Option<String>>(3)?)
-            .unwrap_or_else(|| "unknown".to_string());
-        Ok(CcSwitchRow {
-            request_id: r.get::<_, String>(0)?,
-            app_type: r
-                .get::<_, Option<String>>(1)?
-                .unwrap_or_else(|| "unknown".to_string()),
-            model,
-            input_tokens: r.get::<_, i64>(4)?.max(0) as u64,
-            output_tokens: r.get::<_, i64>(5)?.max(0) as u64,
-            cache_read_tokens: r.get::<_, i64>(6)?.max(0) as u64,
-            cache_creation_tokens: r.get::<_, i64>(7)?.max(0) as u64,
-            total_cost_usd: r.get::<_, f64>(8)?,
-            session_id: r
-                .get::<_, Option<String>>(9)?
-                .unwrap_or_else(|| r.get::<_, String>(0).unwrap_or_default()),
-            created_at: r.get::<_, i64>(10)?,
-        })
-    };
-    let rows = if let Some(since) = since_epoch {
-        stmt.query_map(rusqlite::params![since], map_row)
-    } else {
-        stmt.query_map([], map_row)
-    };
-    rows.map(|rs| rs.filter_map(Result::ok).collect())
-        .unwrap_or_default()
-}
-
-fn insert_ccswitch_rows(conn: &mut Connection, rows: &[CcSwitchRow]) {
-    let tx = conn.transaction().unwrap();
-    for r in rows {
-        let tool = match r.app_type.as_str() {
-            "claude" => "claude",
-            "codex" => "codex",
-            _ => continue,
-        };
-        let project = ccswitch_project_label(tool);
-        let _ = tx.execute(
-            "INSERT INTO usage_records
-               (date, tool, project, model, session_id, input_tok, output_tok,
-                cache_tok, cache_create_tok, cost_usd, priced, timestamp, source_file)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1,?11,?12)
-             ON CONFLICT(source_file, session_id, timestamp) DO UPDATE SET
-                project=excluded.project, model=excluded.model, input_tok=excluded.input_tok,
-                output_tok=excluded.output_tok, cache_tok=excluded.cache_tok,
-                cache_create_tok=excluded.cache_create_tok, cost_usd=excluded.cost_usd,
-                priced=1",
-            rusqlite::params![
-                epoch_to_local_date(r.created_at),
-                tool,
-                project,
-                r.model,
-                r.session_id,
-                r.input_tokens as i64,
-                r.output_tokens as i64,
-                r.cache_read_tokens as i64,
-                r.cache_creation_tokens as i64,
-                r.total_cost_usd,
-                r.created_at,
-                format!("cc-switch:{}", r.request_id),
-            ],
-        );
-    }
-    let _ = tx.commit();
-}
-
-fn ccswitch_project_label(tool: &str) -> &'static str {
-    match tool {
-        "claude" => "Claude Code",
-        "codex" => "Codex",
-        _ => "未分组",
-    }
-}
-
-fn local_day_start_epoch() -> i64 {
-    use chrono::{Local, Timelike};
-    Local::now()
-        .with_hour(0)
-        .and_then(|d| d.with_minute(0))
-        .and_then(|d| d.with_second(0))
-        .and_then(|d| d.with_nanosecond(0))
-        .map(|d| d.timestamp())
-        .unwrap_or(0)
-}
-
-fn epoch_to_local_date(epoch: i64) -> String {
-    use chrono::{Local, TimeZone};
-    Local
-        .timestamp_opt(epoch, 0)
-        .single()
-        .map(|d| d.format("%Y-%m-%d").to_string())
-        .unwrap_or_else(|| "1970-01-01".to_string())
 }
 
 /// Persist records, computing each one's cost from the pricing table. Bulk-load
@@ -687,26 +525,4 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Import cc-switch's own accounting DB into the live app database.
-    /// Run with:
-    ///   cargo test --lib indexer::tests::sync_live_ccswitch -- --ignored --nocapture
-    #[test]
-    #[ignore]
-    fn sync_live_ccswitch() {
-        let db = db::Db::open().unwrap();
-        assert!(
-            import_ccswitch_all(&db),
-            "expected cc-switch rows to import"
-        );
-        mark_indexed(&db);
-        let conn = db.lock();
-        let (rows, cost): (i64, f64) = conn
-            .query_row(
-                "SELECT COUNT(*), COALESCE(SUM(cost_usd),0) FROM usage_records",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        println!("cc-switch rows imported: {rows}, total cost: ${cost:.4}");
-    }
 }

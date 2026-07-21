@@ -80,16 +80,28 @@ impl UsageParser for CodexParser {
         } else {
             start_offset
         };
-        let slice = &bytes[start as usize..];
-        let text = String::from_utf8_lossy(slice);
-
-        // session_meta gives us project (cwd) + model_provider for the whole
-        // file; token_count events don't repeat them. Codex logs don't carry a
-        // concrete model name (only model_provider), so we default to gpt-5.5,
-        // matching what cc-switch reports for Codex sessions.
+        // session_meta gives us project (cwd) + the session id. The concrete
+        // model is emitted by turn_context and may change during a session.
+        // Keep gpt-5.5 only as a fallback for old logs without either field.
         let mut project: Option<String> = None;
         let mut model = String::from("gpt-5.5");
         let mut session_id = String::new();
+
+        // 增量扫描通常从 session_meta 之后继续读取，因此先重放已读取前缀中的
+        // 元数据，确保新追加的 token 记录仍保留项目、会话和最新模型信息。
+        let prefix = &bytes[..start as usize];
+        for line in String::from_utf8_lossy(prefix).lines() {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                continue;
+            };
+            let Some(obj) = value.as_object() else {
+                continue;
+            };
+            apply_session_context(obj, &mut project, &mut model, &mut session_id);
+        }
+
+        let slice = &bytes[start as usize..];
+        let text = String::from_utf8_lossy(slice);
 
         let mut records = Vec::new();
         for line in text.lines() {
@@ -104,24 +116,7 @@ impl UsageParser for CodexParser {
                 continue;
             };
 
-            // Capture session metadata whenever we see it (it's the first line,
-            // but re-reading on resume keeps us robust).
-            if obj.get("type").and_then(|v| v.as_str()) == Some("session_meta") {
-                if let Some(payload) = obj.get("payload").and_then(|v| v.as_object()) {
-                    project = payload
-                        .get("cwd")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string)
-                        .or(project);
-                    if let Some(m) = payload.get("model").and_then(|v| v.as_str()) {
-                        if m != "openai" {
-                            model = m.to_string();
-                        }
-                    }
-                    if let Some(id) = payload.get("id").and_then(|v| v.as_str()) {
-                        session_id = id.to_string();
-                    }
-                }
+            if apply_session_context(obj, &mut project, &mut model, &mut session_id) {
                 continue;
             }
 
@@ -183,6 +178,46 @@ impl UsageParser for CodexParser {
             records,
             new_offset: total,
         }
+    }
+}
+
+fn apply_session_context(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    project: &mut Option<String>,
+    model: &mut String,
+    session_id: &mut String,
+) -> bool {
+    let kind = obj.get("type").and_then(|v| v.as_str());
+    let Some(payload) = obj.get("payload").and_then(|v| v.as_object()) else {
+        return false;
+    };
+
+    match kind {
+        Some("session_meta") => {
+            if let Some(cwd) = payload.get("cwd").and_then(|v| v.as_str()) {
+                *project = Some(cwd.to_string());
+            }
+            if let Some(id) = payload.get("id").and_then(|v| v.as_str()) {
+                *session_id = id.to_string();
+            }
+            // Some older/newer Codex logs put the concrete model here.
+            if let Some(value) = payload.get("model").and_then(|v| v.as_str()) {
+                if value != "openai" && value != "custom" {
+                    *model = value.to_string();
+                }
+            }
+            true
+        }
+        Some("turn_context") => {
+            if let Some(value) = payload.get("model").and_then(|v| v.as_str()) {
+                *model = value.to_string();
+            }
+            if let Some(cwd) = payload.get("cwd").and_then(|v| v.as_str()) {
+                *project = Some(cwd.to_string());
+            }
+            true
+        }
+        _ => false,
     }
 }
 
@@ -258,6 +293,24 @@ mod tests {
     }
 
     #[test]
+    fn uses_real_model_from_turn_context() {
+        let tmp =
+            std::env::temp_dir().join(format!("codex-test-model-context-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let meta = r#"{"timestamp":"2026-06-01T02:39:19.245Z","type":"session_meta","payload":{"id":"sid-1","cwd":"E:\\Dev\\proj","model_provider":"custom"}}"#;
+        let context = r#"{"timestamp":"2026-06-01T02:39:20.000Z","type":"turn_context","payload":{"cwd":"E:\\Dev\\proj","model":"gpt-5.6-sol"}}"#;
+        let usage = r#"{"timestamp":"2026-06-01T02:40:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":50,"total_tokens":150}}}}"#;
+        let file = write_jsonl(&tmp, "rollout-context.jsonl", &[meta, context, usage]);
+
+        let parser = CodexParser::with_root(tmp.clone());
+        let res = parser.parse_file(&file, 0);
+
+        assert_eq!(res.records.len(), 1);
+        assert_eq!(res.records[0].model, "gpt-5.6-sol");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
     fn skips_zero_total_and_non_token_events() {
         let tmp = std::env::temp_dir().join(format!("codex-test2-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
@@ -315,6 +368,29 @@ mod tests {
         assert_eq!(first.records.len(), 1);
         let second = parser.parse_file(&file, first.new_offset);
         assert_eq!(second.records.len(), 0);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn resume_keeps_session_metadata_for_appended_records() {
+        let tmp =
+            std::env::temp_dir().join(format!("codex-test-resume-meta-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let meta = r#"{"timestamp":"2026-06-01T02:39:19.245Z","type":"session_meta","payload":{"id":"sid-1","cwd":"E:\\Dev\\proj","model_provider":"custom"}}"#;
+        let context = r#"{"timestamp":"2026-06-01T02:39:20.000Z","type":"turn_context","payload":{"cwd":"E:\\Dev\\proj","model":"gpt-5.6-sol"}}"#;
+        let first_usage = r#"{"timestamp":"2026-06-01T02:40:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":5,"cached_input_tokens":1,"output_tokens":2}}}}"#;
+        let next_usage = r#"{"timestamp":"2026-06-01T02:41:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":8,"cached_input_tokens":2,"output_tokens":3}}}}"#;
+        let file = write_jsonl(&tmp, "r.jsonl", &[meta, context, first_usage]);
+        let parser = CodexParser::with_root(tmp.clone());
+        let first = parser.parse_file(&file, 0);
+
+        std::fs::write(&file, [meta, context, first_usage, next_usage].join("\n")).unwrap();
+        let second = parser.parse_file(&file, first.new_offset);
+
+        assert_eq!(second.records.len(), 1);
+        assert_eq!(second.records[0].project.as_deref(), Some("E:\\Dev\\proj"));
+        assert_eq!(second.records[0].session_id, "sid-1");
+        assert_eq!(second.records[0].model, "gpt-5.6-sol");
         std::fs::remove_dir_all(&tmp).ok();
     }
 }
